@@ -67,6 +67,11 @@ pub fn render(c: &PromptCtx) -> String {
             c.id
         );
     }
+    // A real run used `--notes` and erased abacus's claim note (v0.1.0 smoke run).
+    let _ = writeln!(
+        s,
+        "\nRecord progress on beads with `bd update <id> --append-notes \"…\"`, never `--notes`, which replaces the run note abacus wrote."
+    );
 
     let _ = writeln!(s, "\n## Bead\n");
     let _ = writeln!(s, "- id: `{}`", c.id);
@@ -228,6 +233,15 @@ mod tests {
             gh: None,
             gh_bead_id: None,
             previous: None,
+        }
+    }
+
+    #[test]
+    fn every_mode_forbids_replacing_bead_notes() {
+        for mode in [Mode::Resolve, Mode::Implement, Mode::Decompose] {
+            let p = render(&ctx(mode));
+            assert!(p.contains("--append-notes"), "{mode:?}");
+            assert!(p.contains("never `--notes`"), "{mode:?}");
         }
     }
 

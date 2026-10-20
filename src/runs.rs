@@ -150,6 +150,14 @@ impl Progress {
         }
     }
 
+    /// Ingests an unterminated last line once the writer is gone (e.g. an agent
+    /// killed mid-write); while the run is live such bytes are an incomplete read.
+    pub fn finish(&mut self) {
+        let rest = std::mem::take(&mut self.partial);
+        let line = String::from_utf8_lossy(&rest);
+        self.ingest_line(line.trim_end_matches('\r'));
+    }
+
     fn ingest_line(&mut self, line: &str) {
         if line.trim().is_empty() {
             return;
@@ -252,6 +260,11 @@ impl Registry {
                 persist(state_dir, &run.meta)?;
             } else if matches!(run.meta.state, RunState::Starting | RunState::Running) {
                 reg.reconcile(&mut run);
+                // The agent may have exited between the first read and the reconcile.
+                reg.catch_up(&mut run);
+            }
+            if !run.meta.state.is_active() {
+                run.progress.finish();
             }
             if run.meta.state == RunState::Failed {
                 reg.append_stderr_tail(&mut run);
@@ -333,6 +346,7 @@ impl Registry {
             if self.reconcile(run) {
                 // Drain whatever the agent wrote between our read and its exit.
                 self.catch_up(run);
+                run.progress.finish();
                 if run.meta.state == RunState::Failed {
                     self.append_stderr_tail(run);
                 }
@@ -432,6 +446,22 @@ mod tests {
         p.ingest(FIXTURE.as_bytes());
         check(&p);
         assert!(p.partial.is_empty());
+    }
+
+    #[test]
+    fn ended_run_ingests_unterminated_final_line() {
+        let state = tempfile::tempdir().unwrap();
+        let repo = Path::new("/repo/a");
+        let m = meta("1-tail", repo, None);
+        persist(state.path(), &m).unwrap();
+        let dir = run_dir(state.path(), "1-tail");
+        fs::write(dir.join("events.jsonl"), FIXTURE.trim_end_matches('\n')).unwrap();
+        fs::write(dir.join("exit_code"), "0\n").unwrap();
+
+        let reg = Registry::load(state.path(), repo).unwrap();
+        let run = reg.find("1-tail").unwrap();
+        assert_eq!(run.meta.state, RunState::Succeeded);
+        check(&run.progress);
     }
 
     #[test]

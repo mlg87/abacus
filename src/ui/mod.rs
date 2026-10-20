@@ -120,6 +120,12 @@ fn top_bar(app: &App) -> Line<'static> {
         Some(t) => Span::raw(format!("loaded {}s ago", t.elapsed().as_secs())),
         None => Span::styled("loading…", dim),
     });
+    if let Some(secs) = app.slow_load_secs() {
+        spans.push(Span::styled(
+            format!(" · ⚠ bd list waiting {secs}s (database busy?)"),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
     if let Some(e) = &app.bd_error {
         spans.push(Span::styled(
             format!(" · ⚠ bd: {e}"),

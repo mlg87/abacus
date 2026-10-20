@@ -212,6 +212,14 @@ impl App {
         self.queue.len()
     }
 
+    /// Seconds the in-flight `bd list` has been running, once it is slow enough
+    /// to mention. A bulk `bd` write elsewhere holds the embedded database and
+    /// stalls reads for minutes; without this the UI looks frozen.
+    pub fn slow_load_secs(&self) -> Option<u64> {
+        let secs = self.load_started?.elapsed().as_secs();
+        (self.loading && secs >= 5).then_some(secs)
+    }
+
     /// Latest visible run per bead, for tree badges and the detail summary.
     pub fn latest_runs(&self) -> HashMap<&str, &Run> {
         let mut m: HashMap<&str, &Run> = HashMap::new();
