@@ -65,16 +65,7 @@ pub fn plan_dispatch(
         (_, Derived::Closed) => return Err("closed".into()),
         (_, Derived::Deferred) => return Err("deferred".into()),
         (_, Derived::Blocked) => {
-            let open: Vec<&str> = g
-                .open_blockers(idx)
-                .into_iter()
-                .map(|j| g.beads[j].id.as_str())
-                .collect();
-            return Err(if open.is_empty() {
-                "blocked (status)".into()
-            } else {
-                format!("blocked by {}", open.join(", "))
-            });
+            return Err(g.blocked_reason(idx).unwrap_or_else(|| "blocked".into()));
         }
         (_, Derived::Other) => return Err("unrecognised status".into()),
     }

@@ -68,8 +68,9 @@ pub struct Bead {
     pub close_reason: Option<String>,
 }
 
-/// Status as the user cares about it: `Open` splits into `Ready`/`Blocked` the same
-/// way `bd ready` does (every `blocks` target closed).
+/// Status as the user cares about it. Stricter than `bd ready`, which only checks a
+/// bead's own `blocks` edges and so reports an epic as ready while every bead under
+/// it is still waiting on upstream work; dispatching against such an epic is wasted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Derived {
     Ready,
@@ -126,6 +127,20 @@ impl Derived {
     }
 }
 
+/// Why a bead derives as `Blocked`, so the UI and dispatch can name the cause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockedBy {
+    /// The bead's own status is `blocked`.
+    Status,
+    /// Open `blocks` targets of the bead itself.
+    Beads(Vec<usize>),
+    /// Nearest ancestor that is itself gated by status or open blockers; its
+    /// dependencies hold back everything beneath it.
+    Ancestor(usize),
+    /// The bead has open children but none of them is ready or in progress.
+    NoReadyChild,
+}
+
 /// Parses the `gh-<N>` external ref the GitHub mirror stamps on epic beads.
 pub fn gh_number(b: &Bead) -> Option<u32> {
     let digits = b.external_ref.as_deref()?.strip_prefix("gh-")?;
@@ -145,6 +160,7 @@ pub struct Graph {
     pub dependents: Vec<Vec<usize>>,
     pub other_links: Vec<Vec<(String, usize)>>,
     pub roots: Vec<usize>,
+    derived: Vec<Derived>,
 }
 
 impl Graph {
@@ -164,6 +180,7 @@ impl Graph {
             other_links: vec![Vec::new(); n],
             roots: Vec::new(),
             beads,
+            derived: vec![Derived::Other; n],
         };
 
         for i in 0..n {
@@ -204,6 +221,7 @@ impl Graph {
                 None => g.roots.push(i),
             }
         }
+        g.derive_all();
         let mut children = std::mem::take(&mut g.children);
         for c in &mut children {
             g.sort(c);
@@ -212,8 +230,7 @@ impl Graph {
         let mut roots = std::mem::take(&mut g.roots);
         g.sort(&mut roots);
         g.roots = roots;
-        // Clone, not take: sort_key -> derived() reads self.blockers.
-        let mut blockers = g.blockers.clone();
+        let mut blockers = std::mem::take(&mut g.blockers);
         for b in &mut blockers {
             g.sort(b);
         }
@@ -255,6 +272,67 @@ impl Graph {
         }
     }
 
+    /// Children must be derived before their parent (roll-up), and gating is read
+    /// off ancestors' own edges, so a post-order walk of the parent forest suffices.
+    fn derive_all(&mut self) {
+        let mut stack: Vec<(usize, bool)> = self.roots.iter().map(|&r| (r, false)).collect();
+        while let Some((i, children_done)) = stack.pop() {
+            if children_done {
+                self.derived[i] = self.derive_one(i);
+            } else {
+                stack.push((i, true));
+                stack.extend(self.children[i].iter().map(|&c| (c, false)));
+            }
+        }
+    }
+
+    fn derive_one(&self, i: usize) -> Derived {
+        match self.beads[i].status {
+            Status::Open => {}
+            Status::InProgress => return Derived::InProgress,
+            Status::Blocked => return Derived::Blocked,
+            Status::Deferred => return Derived::Deferred,
+            Status::Closed => return Derived::Closed,
+            Status::Other => return Derived::Other,
+        }
+        if self.has_open_blocker(i) || self.gated_ancestor(i).is_some() {
+            return Derived::Blocked;
+        }
+        let mut open_children = self.children[i]
+            .iter()
+            .map(|&c| self.derived[c])
+            .filter(|&d| d != Derived::Closed)
+            .peekable();
+        if open_children.peek().is_none() {
+            return Derived::Ready;
+        }
+        let mut any_in_progress = false;
+        for d in open_children {
+            match d {
+                Derived::Ready => return Derived::Ready,
+                Derived::InProgress => any_in_progress = true,
+                _ => {}
+            }
+        }
+        if any_in_progress {
+            Derived::InProgress
+        } else {
+            Derived::Blocked
+        }
+    }
+
+    fn has_open_blocker(&self, i: usize) -> bool {
+        self.blockers[i]
+            .iter()
+            .any(|&j| self.beads[j].status != Status::Closed)
+    }
+
+    fn gated_ancestor(&self, i: usize) -> Option<usize> {
+        self.ancestors(i)
+            .into_iter()
+            .find(|&a| self.beads[a].status == Status::Blocked || self.has_open_blocker(a))
+    }
+
     pub fn sort(&self, v: &mut [usize]) {
         v.sort_by(|&a, &b| self.sort_key(a).cmp(&self.sort_key(b)));
     }
@@ -265,23 +343,38 @@ impl Graph {
     }
 
     pub fn derived(&self, i: usize) -> Derived {
-        match self.beads[i].status {
-            Status::Open => {
-                if self.blockers[i]
-                    .iter()
-                    .all(|&j| self.beads[j].status == Status::Closed)
-                {
-                    Derived::Ready
-                } else {
-                    Derived::Blocked
-                }
-            }
-            Status::InProgress => Derived::InProgress,
-            Status::Blocked => Derived::Blocked,
-            Status::Deferred => Derived::Deferred,
-            Status::Closed => Derived::Closed,
-            Status::Other => Derived::Other,
+        self.derived[i]
+    }
+
+    /// `None` unless `i` derives as `Blocked`.
+    pub fn blocked_by(&self, i: usize) -> Option<BlockedBy> {
+        if self.derived[i] != Derived::Blocked {
+            return None;
         }
+        if self.beads[i].status == Status::Blocked {
+            return Some(BlockedBy::Status);
+        }
+        let open = self.open_blockers(i);
+        if !open.is_empty() {
+            return Some(BlockedBy::Beads(open));
+        }
+        Some(match self.gated_ancestor(i) {
+            Some(a) => BlockedBy::Ancestor(a),
+            None => BlockedBy::NoReadyChild,
+        })
+    }
+
+    /// Human-readable cause, shared by the detail pane and dispatch refusals.
+    pub fn blocked_reason(&self, i: usize) -> Option<String> {
+        Some(match self.blocked_by(i)? {
+            BlockedBy::Status => "blocked (status)".into(),
+            BlockedBy::Beads(js) => {
+                let ids: Vec<&str> = js.iter().map(|&j| self.beads[j].id.as_str()).collect();
+                format!("blocked by {}", ids.join(", "))
+            }
+            BlockedBy::Ancestor(a) => format!("blocked via ancestor {}", self.beads[a].id),
+            BlockedBy::NoReadyChild => "blocked: no open child is ready".into(),
+        })
     }
 
     pub fn get(&self, id: &str) -> Option<usize> {
@@ -367,6 +460,80 @@ pub mod tests {
 
         let g = Graph::build(vec![a, bead("b", "closed")]);
         assert_eq!(g.derived(g.get("a").unwrap()), Derived::Ready);
+    }
+
+    fn under(id: &str, status: &str, parent: &str) -> Bead {
+        let mut b = bead(id, status);
+        b.parent = Some(parent.into());
+        b
+    }
+
+    fn blocked_on(mut b: Bead, on: &str) -> Bead {
+        b.dependencies.push(dep(&b.id.clone(), on, "blocks"));
+        b
+    }
+
+    /// The dispatch-against-unworkable-epic case: `bd ready` lists the epic because
+    /// it has no blockers of its own, yet nothing beneath it can start.
+    #[test]
+    fn parent_whose_open_children_are_all_blocked_is_blocked() {
+        let g = Graph::build(vec![
+            bead("e", "open"),
+            blocked_on(under("c1", "open", "e"), "up"),
+            under("c2", "closed", "e"),
+            bead("up", "open"),
+        ]);
+        let e = g.get("e").unwrap();
+        assert_eq!(g.derived(e), Derived::Blocked);
+        assert_eq!(g.blocked_by(e), Some(BlockedBy::NoReadyChild));
+    }
+
+    #[test]
+    fn one_ready_descendant_makes_every_ancestor_ready() {
+        let g = Graph::build(vec![
+            bead("e", "open"),
+            under("sub", "open", "e"),
+            under("leaf", "open", "sub"),
+            blocked_on(under("stuck", "open", "e"), "up"),
+            bead("up", "open"),
+        ]);
+        assert_eq!(g.derived(g.get("sub").unwrap()), Derived::Ready);
+        assert_eq!(g.derived(g.get("e").unwrap()), Derived::Ready);
+    }
+
+    #[test]
+    fn parent_with_only_in_progress_work_left_reads_in_progress() {
+        let g = Graph::build(vec![
+            bead("e", "open"),
+            under("busy", "in_progress", "e"),
+            blocked_on(under("stuck", "open", "e"), "up"),
+            bead("up", "open"),
+        ]);
+        assert_eq!(g.derived(g.get("e").unwrap()), Derived::InProgress);
+    }
+
+    #[test]
+    fn children_inherit_an_ancestors_open_blockers() {
+        let g = Graph::build(vec![
+            blocked_on(bead("e", "open"), "up"),
+            under("sub", "open", "e"),
+            under("leaf", "open", "sub"),
+            bead("up", "open"),
+        ]);
+        let leaf = g.get("leaf").unwrap();
+        assert_eq!(g.derived(leaf), Derived::Blocked);
+        assert_eq!(
+            g.blocked_by(leaf),
+            Some(BlockedBy::Ancestor(g.get("e").unwrap()))
+        );
+
+        let g = Graph::build(vec![
+            blocked_on(bead("e", "open"), "up"),
+            under("leaf", "open", "e"),
+            bead("up", "closed"),
+        ]);
+        assert_eq!(g.derived(g.get("leaf").unwrap()), Derived::Ready);
+        assert_eq!(g.derived(g.get("e").unwrap()), Derived::Ready);
     }
 
     #[test]
