@@ -2,6 +2,8 @@
 name = "abacus"
 version = "0.1.0"
 edition = "2024"
+# ratatui 0.30 needs 1.88; checked with `cargo +1.88 build --locked`.
+rust-version = "1.88"
 description = "Terminal UI for viewing a beads graph and dispatching omp agents onto beads"
 
 [dependencies]
