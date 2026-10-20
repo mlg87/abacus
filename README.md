@@ -8,15 +8,46 @@
 
 abacus shows every bead in a repo, including its parent/child hierarchy, its `blocks` edges, and whether it is ready. With one key it queues headless `omp` runs that work beads in their own git worktrees. Runs keep going after you quit, and abacus picks them back up on the next launch.
 
-## Quickstart
+## Install
+
+abacus builds from source with Cargo. You need a Rust toolchain at 1.88 or newer, installed with [rustup](https://rustup.rs).
 
 ```console
 $ git clone git@github.com:mlg87/abacus.git && cd abacus
-$ cargo install --path .
-$ abacus --repo ~/workspace/dlb
+$ cargo install --locked --path .
+$ abacus --version
+abacus 0.1.0
 ```
 
-Requires `bd`, `git`, and `omp` on `PATH`. `gh` is needed only when a dispatch creates an issue-linked branch. Building needs a Rust toolchain ([rustup](https://rustup.rs)).
+`--locked` makes Cargo build with the exact dependency versions in `Cargo.lock`. Without it, `cargo install` resolves dependencies again and can build a different binary.
+
+Cargo puts the binary in `~/.cargo/bin`. The rustup installer adds that directory to your `PATH` through `~/.cargo/env`. If your shell says `abacus: command not found`, add this line to your shell profile (for example `~/.zshrc`) and open a new terminal:
+
+```sh
+. "$HOME/.cargo/env"
+```
+
+To update, run `git pull` and then `cargo install --locked --path .` again. To remove abacus, run `cargo uninstall abacus`.
+
+### Runtime requirements
+
+abacus calls these tools, so they must be on your `PATH`:
+
+| Tool | Needed for | Tested with |
+|---|---|---|
+| [`bd`](https://github.com/gastownhall/beads) | Reading and claiming beads. abacus does not start without it. | 1.2.2 |
+| `git` | Worktrees and branches. abacus does not start without it. | 2.50.1 |
+| [`omp`](https://omp.sh) | Running agents. Change it with `--agent-cmd`. | 18.12.3 |
+| [`gh`](https://cli.github.com) | Only when a dispatch creates an issue-linked branch. | 2.97.0 |
+
+## Quickstart
+
+```console
+$ cd ~/workspace/dlb   # any repo with a .beads/ directory
+$ abacus
+```
+
+You can also run `abacus --repo <path>` from anywhere.
 
 ## What the views show
 
