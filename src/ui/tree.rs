@@ -1,10 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem};
 
-use super::{detail, run_badge, truncate};
+use super::{detail, run_badge, theme, truncate};
 use crate::app::{App, Focus};
 use crate::model::{Derived, gh_number};
 
@@ -37,7 +37,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     "  ".repeat(r.depth as usize)
                 ))];
                 if app.marks.contains(&b.id) {
-                    spans.push(Span::styled("▪", Style::new().fg(Color::Magenta)));
+                    spans.push(Span::styled("▪", Style::new().fg(theme::MAGENTA)));
                 }
                 let glyph_style = if dim {
                     base
@@ -54,7 +54,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     if dim {
                         base
                     } else {
-                        Style::new().fg(Color::Cyan)
+                        Style::new().fg(theme::CYAN)
                     },
                 ));
                 let mut suffix: Vec<Span<'static>> = Vec::new();
@@ -70,7 +70,10 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     ));
                 }
                 if let Some(n) = gh_number(b) {
-                    suffix.push(Span::styled(format!(" #{n}"), Style::new().fg(Color::Blue)));
+                    suffix.push(Span::styled(
+                        format!(" #{n}"),
+                        Style::new().fg(theme::VIOLET),
+                    ));
                 }
                 if let Some(run) = latest.get(b.id.as_str()) {
                     suffix.push(Span::raw(" "));
@@ -95,18 +98,13 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!(" Beads · {} marked ", app.marks.len())
     };
-    let border = if app.focus == Focus::Main {
-        Style::new().fg(Color::Cyan)
-    } else {
-        Style::new().fg(Color::DarkGray)
-    };
     let list = List::new(items)
-        .block(Block::bordered().title(title).border_style(border))
-        .highlight_style(
-            Style::new()
-                .bg(Color::Rgb(50, 50, 70))
-                .add_modifier(Modifier::BOLD),
-        );
+        .block(
+            Block::bordered()
+                .title(title)
+                .border_style(theme::border(app.focus == Focus::Main)),
+        )
+        .highlight_style(theme::selected());
     app.tree_state.select(app.sel_row());
     f.render_stateful_widget(list, left, &mut app.tree_state);
     detail::draw(f, app, right, true);

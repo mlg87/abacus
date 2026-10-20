@@ -1,11 +1,12 @@
 mod agents;
 mod detail;
 mod graph;
+mod theme;
 mod tree;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
@@ -20,7 +21,7 @@ pub fn spinner(frame: u64) -> &'static str {
 
 pub fn run_badge(run: &Run, frame: u64) -> Span<'static> {
     match run.meta.state {
-        RunState::Queued => Span::styled("⏳", Style::new().fg(Color::Cyan)),
+        RunState::Queued => Span::styled("⏳", Style::new().fg(theme::CYAN)),
         RunState::Starting | RunState::Running => Span::styled(
             format!("{} running", spinner(frame)),
             Style::new().fg(Color::Yellow),
@@ -32,7 +33,7 @@ pub fn run_badge(run: &Run, frame: u64) -> Span<'static> {
 
 pub fn state_style(s: RunState) -> Style {
     match s {
-        RunState::Queued => Style::new().fg(Color::Cyan),
+        RunState::Queued => Style::new().fg(theme::CYAN),
         RunState::Starting | RunState::Running => Style::new().fg(Color::Yellow),
         RunState::Succeeded => Style::new().fg(Color::Green),
         RunState::Failed | RunState::Killed => Style::new().fg(Color::Red),
@@ -80,14 +81,14 @@ fn top_bar(app: &App) -> Line<'static> {
     let dim = Style::new().fg(Color::DarkGray);
     let tab = |n: &str, name: &str, v: View| {
         let style = if app.view == v {
-            Style::new().fg(Color::Black).bg(Color::Cyan)
+            Style::new().fg(Color::Black).bg(theme::MAGENTA)
         } else {
             Style::new()
         };
         Span::styled(format!("[{n} {name}]"), style)
     };
-    let mut spans = vec![
-        Span::styled("abacus", Style::new().add_modifier(Modifier::BOLD)),
+    let mut spans = theme::wordmark("abacus");
+    spans.extend([
         Span::styled(" · ", dim),
         Span::raw(app.cfg.repo_name.clone()),
         Span::styled(" · ", dim),
@@ -102,7 +103,7 @@ fn top_bar(app: &App) -> Line<'static> {
             app.filter.status.label(),
             app.filter.label.as_deref().unwrap_or("all")
         )),
-    ];
+    ]);
     if !app.filter.query.is_empty() {
         spans.push(Span::raw(format!(" /{}", app.filter.query)));
     }
@@ -138,14 +139,14 @@ fn top_bar(app: &App) -> Line<'static> {
 fn bottom_bar(app: &App) -> Line<'static> {
     if app.searching {
         return Line::from(vec![
-            Span::styled("/", Style::new().fg(Color::Cyan)),
+            Span::styled("/", Style::new().fg(theme::MAGENTA)),
             Span::raw(app.filter.query.clone()),
-            Span::styled("█", Style::new().fg(Color::Cyan)),
+            Span::styled("█", Style::new().fg(theme::MAGENTA)),
             Span::styled("  Enter keep · Esc clear", Style::new().fg(Color::DarkGray)),
         ]);
     }
     if let Some((m, _)) = &app.message {
-        return Line::from(Span::styled(m.clone(), Style::new().fg(Color::Yellow)));
+        return Line::from(Span::styled(m.clone(), Style::new().fg(theme::MAGENTA)));
     }
     let hints = match (app.view, app.focus) {
         (View::Tree, crate::app::Focus::Detail) => {
@@ -226,13 +227,10 @@ fn draw_modal(f: &mut Frame, app: &App) {
             HELP.iter()
                 .map(|(k, v)| {
                     if v.is_empty() {
-                        Line::from(Span::styled(
-                            *k,
-                            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                        ))
+                        Line::from(Span::styled(*k, theme::heading()))
                     } else {
                         Line::from(vec![
-                            Span::styled(format!("  {k:<24}"), Style::new().fg(Color::Yellow)),
+                            Span::styled(format!("  {k:<24}"), Style::new().fg(theme::VIOLET)),
                             Span::raw(*v),
                         ])
                     }
@@ -328,7 +326,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::bordered()
                 .title(format!(" {title} "))
-                .border_style(Style::new().fg(Color::Cyan)),
+                .border_style(theme::border(true)),
         ),
         rect,
     );

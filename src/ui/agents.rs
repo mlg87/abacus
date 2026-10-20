@@ -1,10 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState};
 
-use super::{fmt_duration, spinner, state_style, truncate};
+use super::{fmt_duration, spinner, state_style, theme, truncate};
 use crate::app::App;
 use crate::runs::{RunState, now_secs};
 
@@ -48,7 +48,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(Span::styled(state, state_style(m.state))),
                 Cell::from(Span::styled(
                     m.bead_id.clone(),
-                    Style::new().fg(Color::Cyan),
+                    Style::new().fg(theme::CYAN),
                 )),
                 Cell::from(m.mode.label()),
                 Cell::from(started),
@@ -81,18 +81,14 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             "Cost",
             "Activity / RESULT",
         ])
-        .style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        .style(theme::heading()),
     )
     .block(
         Block::bordered()
             .title(" Agents ")
-            .border_style(Style::new().fg(Color::Cyan)),
+            .border_style(theme::border(true)),
     )
-    .row_highlight_style(
-        Style::new()
-            .bg(Color::Rgb(50, 50, 70))
-            .add_modifier(Modifier::BOLD),
-    );
+    .row_highlight_style(theme::selected());
     let mut state = TableState::default();
     if !empty {
         state.select(Some(app.agents_sel));

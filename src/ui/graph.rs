@@ -1,10 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use super::{detail, truncate};
+use super::{detail, theme, truncate};
 use crate::app::App;
 use crate::model::Status;
 use crate::view_model::GraphScope;
@@ -23,7 +23,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let anchor = app.anchor.clone().unwrap_or_else(|| "-".into());
     let outer = Block::bordered()
         .title(format!(" Graph · anchor {anchor} · scope {scope} "))
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(theme::border(true));
     let inner = outer.inner(cols_area);
     f.render_widget(outer, cols_area);
 
@@ -95,16 +95,11 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             let b = &g.beads[i];
             let d = g.derived(i);
             let (prefix, style) = if Some(i) == sel {
-                (
-                    "",
-                    Style::new()
-                        .bg(Color::Rgb(50, 50, 70))
-                        .add_modifier(Modifier::BOLD),
-                )
+                ("", theme::selected())
             } else if blockers.contains(&i) && app.members.contains(&i) {
-                ("▶", Style::new().fg(Color::Yellow))
+                ("▶", Style::new().fg(theme::CORAL))
             } else if dependents.contains(&i) && app.members.contains(&i) {
-                ("◀", Style::new().fg(Color::Cyan))
+                ("◀", Style::new().fg(theme::CYAN))
             } else {
                 ("", Style::new())
             };
@@ -115,14 +110,14 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             let mark = if app.marks.contains(&b.id) { "▪" } else { "" };
             let mut l1 = vec![
                 Span::styled(prefix, style),
-                Span::styled(mark, Style::new().fg(Color::Magenta)),
+                Span::styled(mark, Style::new().fg(theme::MAGENTA)),
                 Span::styled(d.glyph(), style.fg(d.color())),
                 Span::styled(format!(" P{} {}", b.priority, b.id), style),
             ];
             if outside > 0 {
                 l1.push(Span::styled(
                     format!(" ↗{outside}"),
-                    style.fg(Color::Magenta),
+                    style.fg(theme::VIOLET),
                 ));
             }
             lines.push(Line::from(l1));
