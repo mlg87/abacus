@@ -57,7 +57,13 @@ You can also run `abacus --repo <path>` from anywhere.
 | <kbd>2</kbd> | Graph | Beads in columns by dependency layer over `blocks` edges, scoped to the selection's subtree (`Local`) or everything open (`AllOpen`). Cycles get their own column. |
 | <kbd>3</kbd> | Agents | Every run with its state, elapsed time, cost, and current activity or `RESULT:` line, plus the selected run's live log. |
 
-Status glyphs match `bd graph`: `○` ready, `●` blocked, `◐` in progress, `❄` deferred, `✓` closed. A bead is ready when it is open and every `blocks` target is closed, the same rule as `bd ready`.
+Status glyphs match `bd graph`: `○` ready, `●` blocked, `◐` in progress, `❄` deferred, `✓` closed. Readiness is stricter than `bd ready`, which only looks at a bead's own `blocks` edges and so lists an epic as ready even when nothing under it can start. An open bead is ready in abacus when all of these hold:
+
+- every `blocks` target of the bead is closed;
+- no ancestor is blocked by status or by an open `blocks` target, since that dependency also holds back everything below the ancestor;
+- if the bead has open children, at least one of them is ready.
+
+An open parent whose remaining children are only in progress or blocked shows `◐` if any child is in progress, and `●` if none is. The detail pane names the cause of a block: the open blockers, the blocked ancestor, or "no open child is ready".
 
 ## How dispatch works
 

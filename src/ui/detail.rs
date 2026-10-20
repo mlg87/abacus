@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use super::{fmt_duration, state_style, theme, truncate};
 use crate::app::{App, Focus};
 use crate::dispatch::issue_url;
-use crate::model::gh_number;
+use crate::model::{Derived, gh_number};
 use crate::runs::now_secs;
 
 /// `full` adds the latest run summary and the long text fields (tree view);
@@ -68,6 +68,12 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, full: bool) {
         header.push(Line::from(Span::styled(
             url,
             Style::new().fg(theme::VIOLET),
+        )));
+    }
+    if let Some(reason) = g.blocked_reason(i) {
+        header.push(Line::from(Span::styled(
+            reason,
+            Style::new().fg(Derived::Blocked.color()),
         )));
     }
     if let Some(at) = &b.closed_at {
