@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>abacus</title>
+  <!-- Vector rebuild of the Midjourney source render: the mark, plus the "rod" through
+       it with beads where it crosses each edge, on a dark tile with warm and cool glow. -->
+  <defs>
+    <clipPath id="tile"><rect width="1024" height="1024" rx="96"/></clipPath>
+    <radialGradient id="glow-warm" cx="300" cy="760" r="520" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3A160C" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#3A160C" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-cool" cx="760" cy="420" r="460" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2A1B45" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#2A1B45" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-bead" cx="576" cy="512" r="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.9"/>
+      <stop offset="0.35" stop-color="#9B6BFF" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#9B6BFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rod" gradientUnits="userSpaceOnUse" x1="102" y1="0" x2="922" y2="0">
+      <stop offset="0" stop-color="#FD5A6F"/>
+      <stop offset="0.5" stop-color="#FF9FF5"/>
+      <stop offset="1" stop-color="#7B6CFF"/>
+    </linearGradient>
+    <linearGradient id="abacus-across" gradientUnits="userSpaceOnUse" x1="192" y1="0" x2="832" y2="0">
+      <stop offset="0" stop-color="#FD5A6F"/>
+      <stop offset="0.22" stop-color="#FE5B99"/>
+      <stop offset="0.42" stop-color="#FF4FF0"/>
+      <stop offset="0.58" stop-color="#FF4FF0"/>
+      <stop offset="0.72" stop-color="#AF80FD"/>
+      <stop offset="1" stop-color="#00E5FF"/>
+    </linearGradient>
+    <linearGradient id="abacus-stem" gradientUnits="userSpaceOnUse" x1="0" y1="380" x2="0" y2="828">
+      <stop offset="0" stop-color="#FD6A59" stop-opacity="0"/>
+      <stop offset="1" stop-color="#FD6A59"/>
+    </linearGradient>
+    <linearGradient id="abacus-leg" gradientUnits="userSpaceOnUse" x1="0" y1="330" x2="0" y2="560">
+      <stop offset="0" stop-color="#FD5F5D" stop-opacity="0"/>
+      <stop offset="1" stop-color="#FD5F5D" stop-opacity="0.8"/>
+    </linearGradient>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect width="1024" height="1024" fill="#0B0A10"/>
+    <rect width="1024" height="1024" fill="url(#glow-warm)"/>
+    <rect width="1024" height="1024" fill="url(#glow-cool)"/>
+
+    <!-- construction frame and center axis -->
+    <g fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="2">
+      <rect x="102" y="102" width="820" height="820"/>
+      <path d="M512 102V922"/>
+    </g>
+    <circle cx="512" cy="102" r="6" fill="#4A3A7A"/>
+    <circle cx="512" cy="922" r="6" fill="#6A2A22"/>
+
+    <path fill="url(#abacus-across)" d="M192 196H832V324H576V828H448V324H320V560H192Z"/>
+    <rect x="448" y="324" width="128" height="504" fill="url(#abacus-stem)"/>
+    <rect x="192" y="324" width="128" height="236" fill="url(#abacus-leg)"/>
+
+    <!-- the rod and its beads -->
+    <path d="M102 512H922" stroke="url(#rod)" stroke-opacity="0.55" stroke-width="3"/>
+    <path d="M512 336V730" stroke="#FFFFFF" stroke-opacity="0.45" stroke-width="3"/>
+    <circle cx="576" cy="512" r="48" fill="url(#glow-bead)"/>
+    <g>
+      <circle cx="102" cy="512" r="9" fill="#FD5A6F"/>
+      <circle cx="192" cy="512" r="9" fill="#FF8FB0"/>
+      <circle cx="320" cy="512" r="9" fill="#FF9FC4"/>
+      <circle cx="448" cy="512" r="9" fill="#FFB0E0"/>
+      <circle cx="512" cy="512" r="10" fill="#FFFFFF"/>
+      <circle cx="576" cy="512" r="10" fill="#FFFFFF"/>
+      <circle cx="922" cy="512" r="9" fill="#7B6CFF"/>
+      <circle cx="512" cy="396" r="6" fill="#FFFFFF" fill-opacity="0.55"/>
+      <circle cx="512" cy="662" r="7" fill="#FFFFFF" fill-opacity="0.9"/>
+    </g>
+  </g>
+</svg>

@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::{fmt_duration, state_style, truncate};
+use super::{fmt_duration, state_style, theme, truncate};
 use crate::app::{App, Focus};
 use crate::dispatch::issue_url;
 use crate::model::gh_number;
@@ -14,11 +14,7 @@ use crate::runs::now_secs;
 /// the graph view's compact pane shows only header and relationships.
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect, full: bool) {
     let focused = app.focus == Focus::Detail;
-    let border = if focused {
-        Style::new().fg(Color::Cyan)
-    } else {
-        Style::new().fg(Color::DarkGray)
-    };
+    let border = theme::border(focused);
     let block = Block::bordered().title(" Detail ").border_style(border);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -43,7 +39,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, full: bool) {
             Span::styled(b.title.clone(), Style::new().add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled(b.id.clone(), Style::new().fg(Color::Cyan)),
+            Span::styled(b.id.clone(), Style::new().fg(theme::CYAN)),
             Span::styled(
                 format!(
                     " · {} · P{} · {} · {} · {}",
@@ -69,7 +65,10 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, full: bool) {
         ]),
     ];
     if let Some(url) = gh_number(b).and_then(|n| issue_url(app.cfg.origin.as_ref(), n)) {
-        header.push(Line::from(Span::styled(url, Style::new().fg(Color::Blue))));
+        header.push(Line::from(Span::styled(
+            url,
+            Style::new().fg(theme::VIOLET),
+        )));
     }
     if let Some(at) = &b.closed_at {
         let reason = b.close_reason.as_deref().unwrap_or("");
@@ -89,7 +88,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, full: bool) {
         if last_section != Some(section.as_str()) {
             items.push(ListItem::new(Line::from(Span::styled(
                 section.clone(),
-                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                theme::heading(),
             ))));
             last_section = Some(section.as_str());
         }
@@ -99,7 +98,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, full: bool) {
             Span::raw("  "),
             Span::styled(jd.glyph(), Style::new().fg(jd.color())),
             Span::raw(" "),
-            Span::styled(g.beads[*j].id.clone(), Style::new().fg(Color::Cyan)),
+            Span::styled(g.beads[*j].id.clone(), Style::new().fg(theme::CYAN)),
             Span::raw(format!(" {}", g.beads[*j].title)),
         ])));
     }
@@ -116,10 +115,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, full: bool) {
                 .map(|s| fmt_duration(m.ended_at.unwrap_or_else(now_secs).saturating_sub(s)))
                 .unwrap_or_else(|| "-".into());
             summary.push(Line::from(vec![
-                Span::styled(
-                    "Latest run ",
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("Latest run ", theme::heading()),
                 Span::raw(format!("{} · ", m.mode.label())),
                 Span::styled(m.state.label(), state_style(m.state)),
                 Span::raw(format!(" · {elapsed} · ${:.2}", run.progress.cost_usd)),
@@ -142,7 +138,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, full: bool) {
             if let Some(pr) = &run.progress.pr_url {
                 summary.push(Line::from(Span::styled(
                     format!("  {pr}"),
-                    Style::new().fg(Color::Blue),
+                    Style::new().fg(theme::VIOLET),
                 )));
             }
             if let Some(wt) = &m.worktree {
@@ -158,10 +154,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, full: bool) {
                 continue;
             }
             summary.push(Line::raw(""));
-            summary.push(Line::from(Span::styled(
-                heading,
-                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            )));
+            summary.push(Line::from(Span::styled(heading, theme::heading())));
             summary.extend(body.lines().map(|l| Line::raw(l.to_string())));
         }
     }
@@ -188,9 +181,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, full: bool) {
         state.select(Some(entry_item[sel]));
     }
     let list = List::new(items).highlight_style(if focused {
-        Style::new()
-            .bg(Color::Rgb(50, 50, 70))
-            .add_modifier(Modifier::BOLD)
+        theme::selected()
     } else {
         Style::new()
     });

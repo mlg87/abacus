@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="160 164 704 696" width="704" height="696">
+  <title>abacus</title>
+  <!-- Geometry and stops traced from the Midjourney source render (1024 grid, 128-unit stroke). -->
+  <defs>
+    <linearGradient id="abacus-across" gradientUnits="userSpaceOnUse" x1="192" y1="0" x2="832" y2="0">
+      <stop offset="0" stop-color="#FD5A6F"/>
+      <stop offset="0.22" stop-color="#FE5B99"/>
+      <stop offset="0.42" stop-color="#FF4FF0"/>
+      <stop offset="0.58" stop-color="#FF4FF0"/>
+      <stop offset="0.72" stop-color="#AF80FD"/>
+      <stop offset="1" stop-color="#00E5FF"/>
+    </linearGradient>
+    <linearGradient id="abacus-stem" gradientUnits="userSpaceOnUse" x1="0" y1="380" x2="0" y2="828">
+      <stop offset="0" stop-color="#FD6A59" stop-opacity="0"/>
+      <stop offset="1" stop-color="#FD6A59"/>
+    </linearGradient>
+    <linearGradient id="abacus-leg" gradientUnits="userSpaceOnUse" x1="0" y1="330" x2="0" y2="560">
+      <stop offset="0" stop-color="#FD5F5D" stop-opacity="0"/>
+      <stop offset="1" stop-color="#FD5F5D" stop-opacity="0.8"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#abacus-across)" d="M192 196H832V324H576V828H448V324H320V560H192Z"/>
+  <rect x="448" y="324" width="128" height="504" fill="url(#abacus-stem)"/>
+  <rect x="192" y="324" width="128" height="236" fill="url(#abacus-leg)"/>
+</svg>
