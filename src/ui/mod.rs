@@ -6,12 +6,13 @@ mod tree;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::app::{App, Modal, View};
 use crate::runs::{Run, RunState};
+use crate::update::{Status as UpdateStatus, Version};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -89,6 +90,7 @@ fn top_bar(app: &App) -> Line<'static> {
     };
     let mut spans = theme::wordmark("abacus");
     spans.extend([
+        Span::styled(format!(" {}", Version::current()), dim),
         Span::styled(" · ", dim),
         Span::raw(app.cfg.repo_name.clone()),
         Span::styled(" · ", dim),
@@ -162,7 +164,30 @@ fn bottom_bar(app: &App) -> Line<'static> {
             "↑↓ run · Enter bead · K kill · R retry · Q drain queue · o session · C clear ended · PgUp/PgDn log · ? help · q quit"
         }
     };
-    Line::from(Span::styled(hints, Style::new().fg(Color::DarkGray)))
+    // Leads the line so a narrow terminal clips the hints, not the update.
+    let mut spans = match app.update {
+        Some(UpdateStatus::Available(v)) => vec![Span::styled(
+            format!(" U update to {v} "),
+            Style::new()
+                .fg(Color::Black)
+                .bg(theme::CYAN)
+                .add_modifier(Modifier::BOLD),
+        )],
+        Some(UpdateStatus::Installing(v)) => vec![Span::styled(
+            format!("{} installing {v}…", spinner(app.frame)),
+            Style::new().fg(theme::CYAN),
+        )],
+        Some(UpdateStatus::Installed(v)) => vec![Span::styled(
+            format!("✓ {v} installed · relaunch to use it"),
+            Style::new().fg(Color::Green),
+        )],
+        None => Vec::new(),
+    };
+    if !spans.is_empty() {
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(hints, Style::new().fg(Color::DarkGray)));
+    Line::from(spans)
 }
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
@@ -183,6 +208,7 @@ const HELP: &[(&str, &str)] = &[
     ("L", "cycle label filter"),
     ("/", "search id or title (Enter keep, Esc clear)"),
     ("r", "reload beads now"),
+    ("U", "install the newer release the bottom bar offers"),
     ("?", "toggle this help"),
     ("q, Ctrl-C", "quit (running agents keep running)"),
     ("Tree", ""),
@@ -363,6 +389,28 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 )),
             ],
         ),
+        Modal::Update { version, command } => (
+            "Update",
+            vec![
+                Line::raw(format!("Update abacus {} → {version}?", Version::current())),
+                Line::raw(""),
+                Line::raw("Builds from source in the background (a few minutes):"),
+                Line::from(Span::styled(
+                    format!("  {command}"),
+                    Style::new().fg(theme::VIOLET),
+                )),
+                Line::raw(format!(
+                    "Output goes to {}. Running agents keep running.",
+                    app.cfg.state_dir.join("update.log").display()
+                )),
+                Line::raw("Relaunch abacus afterwards to use the new version."),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "y/Enter update · n/Esc cancel",
+                    Style::new().fg(Color::DarkGray),
+                )),
+            ],
+        ),
         Modal::Quit(n) => (
             "Quit",
             vec![
@@ -394,4 +442,77 @@ fn draw_modal(f: &mut Frame, app: &App) {
         ),
         rect,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+    use crate::app::{AppEvent, Config};
+    use crate::runs::Registry;
+
+    fn app(state: &Path) -> App {
+        let repo = Path::new("/repo/a");
+        let cfg = Config {
+            repo_root: repo.to_path_buf(),
+            state_dir: state.to_path_buf(),
+            max_concurrent: 1,
+            model: None,
+            agent_cmd: "omp".into(),
+            repo_name: "a".into(),
+            origin: None,
+        };
+        let (tx, _) = std::sync::mpsc::channel();
+        App::new(cfg, Registry::load(state, repo).unwrap(), tx)
+    }
+
+    fn screen(app: &mut App, width: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(width, 16)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn press(app: &mut App, c: char) {
+        app.handle(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::NONE,
+        )));
+    }
+
+    #[test]
+    fn update_offer_survives_a_narrow_bottom_bar_and_u_prompts_for_the_install() {
+        let state = tempfile::tempdir().unwrap();
+        let mut app = app(state.path());
+        let newer = Version::parse("999.0.0").unwrap();
+        assert!(screen(&mut app, 80)[0].starts_with(&format!("abacus {}", Version::current())));
+
+        app.handle(AppEvent::UpdateAvailable(newer));
+        // Too narrow for the key hints; the offer leads, so it is what stays.
+        let bottom = screen(&mut app, 30).pop().unwrap();
+        assert!(bottom.starts_with(" U update to v999.0.0 "), "{bottom}");
+
+        press(&mut app, 'U');
+        let prompt = screen(&mut app, 120).join("\n");
+        assert!(
+            prompt.contains("--git https://github.com/mlg87/abacus --tag v999.0.0"),
+            "{prompt}"
+        );
+        press(&mut app, 'n');
+        assert!(app.modal.is_none());
+
+        // A failed build leaves the offer up for another try.
+        app.handle(AppEvent::UpdateInstalled {
+            version: newer,
+            result: Err("cargo install failed".into()),
+        });
+        assert_eq!(app.update, Some(UpdateStatus::Available(newer)));
+    }
 }

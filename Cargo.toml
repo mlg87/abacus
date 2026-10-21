@@ -1,10 +1,12 @@
 [package]
 name = "abacus"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # ratatui 0.30 needs 1.88; checked with `cargo +1.88 build --locked`.
 rust-version = "1.88"
 description = "Terminal UI for viewing a beads graph and dispatching omp agents onto beads"
+# The update check and `U` install read release tags from here.
+repository = "https://github.com/mlg87/abacus"
 
 [dependencies]
 ratatui = "0.30"

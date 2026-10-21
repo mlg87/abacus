@@ -7,6 +7,7 @@ mod prompt;
 mod runs;
 mod session;
 mod ui;
+mod update;
 mod view_model;
 mod watch;
 
@@ -152,6 +153,7 @@ fn run(cli: Cli) -> Result<()> {
         }
     });
 
+    update::spawn_checker(tx.clone());
     let mut app = App::new(cfg, registry, tx);
     if let Some(e) = watch_error {
         app.flash(e);
