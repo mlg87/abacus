@@ -12,6 +12,7 @@ use crate::git;
 use crate::model::{Bead, Derived, Graph, Status, gh_number};
 use crate::runs::{self, Mode, Registry, Run, RunMeta, RunState};
 use crate::session;
+use crate::update::{self, Status as UpdateStatus, Version};
 use crate::view_model::{self, Filter, GraphScope, Layers, Row};
 
 pub enum AppEvent {
@@ -36,6 +37,13 @@ pub enum AppEvent {
     ClaimsReleased {
         run_id: String,
         result: Result<Vec<String>, String>,
+    },
+    /// A release newer than this build is published.
+    UpdateAvailable(Version),
+    /// `cargo install` of `version` finished.
+    UpdateInstalled {
+        version: Version,
+        result: Result<(), String>,
     },
 }
 
@@ -80,6 +88,11 @@ pub enum Modal {
     Quit(usize),
     /// Cancel every queued run; carries the count shown in the prompt.
     DrainQueue(usize),
+    /// Install a newer release; carries the command shown in the prompt.
+    Update {
+        version: Version,
+        command: String,
+    },
     Help,
 }
 
@@ -147,6 +160,7 @@ pub struct App {
     pub modal: Option<Modal>,
     pub searching: bool,
     pub quit: bool,
+    pub update: Option<UpdateStatus>,
     pub frame: u64,
 }
 
@@ -192,6 +206,7 @@ impl App {
             modal: None,
             searching: false,
             quit: false,
+            update: None,
             frame: 0,
         }
     }
@@ -310,6 +325,21 @@ impl App {
                     Err(e) => self.flash(format!("could not release claim of run {run_id}: {e}")),
                 }
             }
+            AppEvent::UpdateAvailable(latest) => {
+                self.update = Some(update::offer(self.update, latest));
+            }
+            AppEvent::UpdateInstalled { version, result } => match result {
+                Ok(()) => {
+                    self.update = Some(UpdateStatus::Installed(version));
+                    self.flash(format!(
+                        "abacus {version} installed; quit and relaunch to use it"
+                    ));
+                }
+                Err(e) => {
+                    self.update = Some(UpdateStatus::Available(version));
+                    self.flash(format!("update to {version} failed: {e}"));
+                }
+            },
         }
     }
 
@@ -698,6 +728,7 @@ impl App {
                 self.filter.status = self.filter.status.next();
                 return self.invalidate();
             }
+            KeyCode::Char('U') => return self.open_update(),
             KeyCode::Char('L') => return self.cycle_label(),
             KeyCode::Char('/') => {
                 self.searching = true;
@@ -723,6 +754,23 @@ impl App {
             self.modal = Some(Modal::Quit(n));
         } else {
             self.quit = true;
+        }
+    }
+
+    fn open_update(&mut self) {
+        match self.update {
+            Some(UpdateStatus::Available(version)) => {
+                let command = update::command_line(&update::install_command(version));
+                self.modal = Some(Modal::Update { version, command });
+            }
+            Some(UpdateStatus::Installing(v)) => self.flash(format!("already installing {v}")),
+            Some(UpdateStatus::Installed(v)) => self.flash(format!(
+                "{v} is installed; quit and relaunch abacus to use it"
+            )),
+            None => self.flash(format!(
+                "no release newer than {} found",
+                Version::current()
+            )),
         }
     }
 
@@ -774,6 +822,14 @@ impl App {
             Some(Modal::Kill(run_id)) if yes => self.kill(&run_id),
             Some(Modal::Delete(ids)) if yes => self.delete(ids),
             Some(Modal::DrainQueue(_)) if yes => self.cancel_all_queued(),
+            Some(Modal::Update { version, .. }) if yes => {
+                self.update = Some(UpdateStatus::Installing(version));
+                update::spawn_install(
+                    version,
+                    self.cfg.state_dir.join("update.log"),
+                    self.tx.clone(),
+                );
+            }
             Some(Modal::Quit(_)) if yes => self.quit = true,
             other => self.modal = other,
         }

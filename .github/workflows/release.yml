@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# Back-to-back merges release in order; neither run is dropped.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # The PR that bumped Cargo.toml is merged, so this commit builds exactly
+      # the tagged version: `cargo install --git ... --tag` reads it from here.
+      - name: Tag and publish the Cargo.toml version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(scripts/conventional-commits.sh cargo-version HEAD)"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            # Two PRs that bumped to the same version both pass their check
+            # when neither has merged yet; the second one's changes wait.
+            level=$(scripts/conventional-commits.sh level "$tag" HEAD)
+            if [[ $level != none ]]; then
+              echo "::warning::$tag is already released; the $level changes merged since then ship with the next version bump."
+            else
+              echo "$tag is already released; nothing to publish."
+            fi
+            exit 0
+          fi
+          gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --generate-notes

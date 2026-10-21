@@ -16,7 +16,6 @@ abacus builds from source with Cargo. You need a Rust toolchain at 1.88 or newer
 $ git clone git@github.com:mlg87/abacus.git && cd abacus
 $ cargo install --locked --path .
 $ abacus --version
-abacus 0.1.0
 ```
 
 `--locked` makes Cargo build with the exact dependency versions in `Cargo.lock`. Without it, `cargo install` resolves dependencies again and can build a different binary.
@@ -27,7 +26,7 @@ Cargo puts the binary in `~/.cargo/bin`. The rustup installer adds that director
 . "$HOME/.cargo/env"
 ```
 
-To update, run `git pull` and then `cargo install --locked --path .` again. To remove abacus, run `cargo uninstall abacus`.
+To update, press <kbd>U</kbd> in abacus when its bottom bar offers a newer release (see [Releases and updates](#releases-and-updates)). You can also run `git pull` and then `cargo install --locked --path .` again. To remove abacus, run `cargo uninstall abacus`.
 
 ### Runtime requirements
 
@@ -122,6 +121,7 @@ Each run lives in `<state-dir>/runs/<run-id>/`: `meta.json`, `prompt.md`, `event
 |---|---|---|
 | Everywhere | <kbd>f</kbd> / <kbd>L</kbd> / <kbd>/</kbd> | Cycle status filter / cycle label filter / search |
 | Everywhere | <kbd>r</kbd>, <kbd>?</kbd>, <kbd>q</kbd> | Reload, help, quit (running agents keep running) |
+| Everywhere | <kbd>U</kbd> | Install the newer release that the bottom bar offers |
 | Tree | <kbd>→</kbd> <kbd>←</kbd>, <kbd>e</kbd> / <kbd>E</kbd> | Expand or collapse, all or none |
 | Tree | <kbd>Tab</kbd> | Focus the detail pane; <kbd>Enter</kbd> jumps to the highlighted relationship |
 | Tree, Graph | <kbd>space</kbd>, <kbd>d</kbd>, <kbd>D</kbd>, <kbd>X</kbd> | Mark, dispatch, decompose, delete |
@@ -131,6 +131,18 @@ Each run lives in `<state-dir>/runs/<run-id>/`: `meta.json`, `prompt.md`, `event
 
 </details>
 
+## Releases and updates
+
+The top bar shows the version you are running, next to the name. When a merge to `main` changes the version in `Cargo.toml`, CI tags that commit `vX.Y.Z` and publishes a [GitHub release](https://github.com/mlg87/abacus/releases) with generated notes.
+
+abacus looks for a newer release at launch and then every hour. It lists the repository's tags with `git ls-remote`, so the check needs no GitHub token. When it finds a newer release, the bottom bar starts with <kbd>U</kbd> `update to vX.Y.Z`. Press <kbd>U</kbd> and confirm, and abacus runs this in the background:
+
+```sh
+cargo install --locked --git https://github.com/mlg87/abacus --tag vX.Y.Z
+```
+
+The build takes a few minutes. Its output goes to `<state-dir>/update.log`, and running agents keep running. If you installed abacus into another Cargo root with `--root`, the update goes into that root too. When the install finishes, the bottom bar says so. Quit and relaunch abacus to use the new version. If the build fails, the offer stays up so you can try again.
+
 ## Brand assets
 
 | File | Use |
@@ -139,3 +151,33 @@ Each run lives in `<state-dir>/runs/<run-id>/`: `meta.json`, `prompt.md`, `event
 | [`assets/abacus-mark.svg`](assets/abacus-mark.svg) | Mark only, transparent. For small sizes and light backgrounds. |
 
 The TUI chrome uses the mark's gradient stops, defined in [`src/ui/theme.rs`](src/ui/theme.rs): coral `#FD5A6F`, magenta `#FF4FF0`, violet `#AF80FD`, and cyan `#00E5FF`. Bead status colours stay semantic, matching `bd graph`.
+
+## Contributing
+
+A PR to `main` merges only when these checks pass:
+
+| Check | Passes when |
+|---|---|
+| `test` | `cargo test --locked` passes. |
+| `coverage` | Line coverage from `cargo-llvm-cov` is at least the base commit's. Coverage only goes up. |
+| `conventional commits` | The PR title and every commit except merge commits follow [Conventional Commits](https://www.conventionalcommits.org): `<type>[(scope)][!]: <description>`. The type is one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, or `test`. |
+| `version` | `Cargo.toml` raises the version by the largest bump that the PR's commits and title call for. |
+
+| Largest change in the PR | Bump | From 0.2.0 |
+|---|---|---|
+| `!` after the type, or a `BREAKING CHANGE:` footer | major | 1.0.0 |
+| `feat` | minor | 0.3.0 |
+| `fix` or `perf` | patch | 0.2.1 |
+| any other type | none | 0.2.0 |
+
+The PR sets the version itself, because CI never pushes to `main`. After you edit `version` in `Cargo.toml`, run `cargo update --workspace` so `Cargo.lock` matches. `cargo test --locked` fails if it does not. If another PR releases while yours is open, merge `main` into your branch, and the `version` check names the next version. If two PRs merge with the same version, the release job warns, and the second PR's changes go out with the next release.
+
+To run the checks locally:
+
+```sh
+scripts/conventional-commits.sh lint origin/main HEAD
+scripts/conventional-commits.sh version origin/main HEAD
+scripts/coverage-ratchet.sh origin/main
+```
+
+The coverage script needs `jq` and `cargo-llvm-cov`. To install `cargo-llvm-cov`, run `rustup component add llvm-tools-preview && cargo install --locked cargo-llvm-cov`.
