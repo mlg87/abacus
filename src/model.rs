@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer};
@@ -114,17 +115,6 @@ impl Derived {
             Derived::Other => "other",
         }
     }
-
-    fn rank(self) -> u8 {
-        match self {
-            Derived::InProgress => 0,
-            Derived::Ready => 1,
-            Derived::Blocked => 2,
-            Derived::Deferred => 3,
-            Derived::Other => 4,
-            Derived::Closed => 5,
-        }
-    }
 }
 
 /// Why a bead derives as `Blocked`, so the UI and dispatch can name the cause.
@@ -222,13 +212,31 @@ impl Graph {
             }
         }
         g.derive_all();
+
+        // A `blocks` edge orders beads only among siblings, so each open blocker is
+        // lifted to the pair of siblings holding it and its dependent. A closed
+        // blocker no longer holds anything back, so it contributes no constraint.
+        let mut lifted: HashMap<Option<usize>, Vec<(usize, usize)>> = HashMap::new();
+        for d in 0..n {
+            for &b in &g.blockers[d] {
+                if g.beads[b].status == Status::Closed {
+                    continue;
+                }
+                if let Some((x, y)) = g.sibling_pair(b, d) {
+                    lifted.entry(g.parent[x]).or_default().push((x, y));
+                }
+            }
+        }
+        let mut pos = vec![0; n];
         let mut children = std::mem::take(&mut g.children);
-        for c in &mut children {
-            g.sort(c);
+        for (p, c) in children.iter_mut().enumerate() {
+            let edges = lifted.get(&Some(p)).map_or(&[][..], Vec::as_slice);
+            g.order_siblings(c, edges, &mut pos);
         }
         g.children = children;
         let mut roots = std::mem::take(&mut g.roots);
-        g.sort(&mut roots);
+        let edges = lifted.get(&None).map_or(&[][..], Vec::as_slice);
+        g.order_siblings(&mut roots, edges, &mut pos);
         g.roots = roots;
         let mut blockers = std::mem::take(&mut g.blockers);
         for b in &mut blockers {
@@ -333,13 +341,94 @@ impl Graph {
             .find(|&a| self.beads[a].status == Status::Blocked || self.has_open_blocker(a))
     }
 
+    /// Siblings read in dependency order (blockers first), then priority, then age;
+    /// closed beads sink. Status is deliberately not part of the key: grouping by it
+    /// put a P1 below a P2 and buried priority under whatever state a bead was in.
     pub fn sort(&self, v: &mut [usize]) {
         v.sort_by(|&a, &b| self.sort_key(a).cmp(&self.sort_key(b)));
     }
 
-    pub fn sort_key(&self, i: usize) -> (u8, i32, &str, &str) {
+    /// Closed beads last; everything else priority-first, then oldest, then id for a
+    /// total order. Also used for blockers, dependents, and dispatch targets.
+    pub fn sort_key(&self, i: usize) -> (bool, i32, &str, &str) {
         let b = &self.beads[i];
-        (self.derived(i).rank(), b.priority, &b.created_at, &b.id)
+        (b.status == Status::Closed, b.priority, &b.created_at, &b.id)
+    }
+
+    /// Orders `sibs` (children of one parent, or the roots) so that every bead follows
+    /// the siblings that block it. Among the available siblings the smallest sort key
+    /// goes next, so priority and age decide everything dependencies do not force.
+    /// If a lifted blocks cycle leaves nothing available, the smallest remaining
+    /// sibling is emitted anyway: every sibling appears exactly once and the walk
+    /// always terminates. `pos` is scratch space sized to the bead count.
+    fn order_siblings(&self, sibs: &mut [usize], lifted: &[(usize, usize)], pos: &mut [usize]) {
+        self.sort(sibs);
+        if lifted.is_empty() {
+            return;
+        }
+        // Sorted position is the heap key, so "smallest sort key" is "smallest index".
+        for (k, &s) in sibs.iter().enumerate() {
+            pos[s] = k;
+        }
+        let m = sibs.len();
+        let mut indeg = vec![0usize; m];
+        let mut succ: Vec<Vec<usize>> = vec![Vec::new(); m];
+        for &(b, d) in lifted {
+            succ[pos[b]].push(pos[d]);
+            indeg[pos[d]] += 1;
+        }
+        let mut ready: BinaryHeap<Reverse<usize>> =
+            (0..m).filter(|&k| indeg[k] == 0).map(Reverse).collect();
+        let mut done = vec![false; m];
+        let mut out = Vec::with_capacity(m);
+        let mut cursor = 0;
+        loop {
+            let k = match ready.pop() {
+                Some(Reverse(k)) => k,
+                None => {
+                    while cursor < m && done[cursor] {
+                        cursor += 1;
+                    }
+                    if cursor == m {
+                        break;
+                    }
+                    cursor
+                }
+            };
+            done[k] = true;
+            out.push(sibs[k]);
+            for &v in &succ[k] {
+                if !done[v] {
+                    indeg[v] -= 1;
+                    if indeg[v] == 0 {
+                        ready.push(Reverse(v));
+                    }
+                }
+            }
+        }
+        sibs.copy_from_slice(&out);
+    }
+
+    /// The two siblings through which a `blocks` edge (blocker `b`, dependent `d`)
+    /// constrains order: the children of their lowest common ancestor on each side,
+    /// or the two roots when the trees are disjoint. `None` when one bead contains the
+    /// other: an ancestor's own position already frames its descendants.
+    fn sibling_pair(&self, b: usize, d: usize) -> Option<(usize, usize)> {
+        let mut d_chain = vec![d];
+        d_chain.extend(self.ancestors(d));
+        let mut below_b = b;
+        let mut cur = Some(b);
+        while let Some(x) = cur {
+            if let Some(at) = d_chain.iter().position(|&y| y == x) {
+                if x == b || at == 0 {
+                    return None;
+                }
+                return Some((below_b, d_chain[at - 1]));
+            }
+            below_b = x;
+            cur = self.parent[x];
+        }
+        Some((below_b, *d_chain.last()?))
     }
 
     pub fn derived(&self, i: usize) -> Derived {
@@ -473,6 +562,12 @@ pub mod tests {
         b
     }
 
+    fn with_priority(mut b: Bead, priority: i32, created_at: &str) -> Bead {
+        b.priority = priority;
+        b.created_at = created_at.into();
+        b
+    }
+
     /// The dispatch-against-unworkable-epic case: `bd ready` lists the epic because
     /// it has no blockers of its own, yet nothing beneath it can start.
     #[test]
@@ -582,5 +677,93 @@ pub mod tests {
         assert_eq!(b.status, Status::Other);
         assert!(b.labels.is_empty());
         assert_eq!(gh_number(&b), Some(12));
+    }
+
+    /// Priority decides among siblings even when status would have put the lower
+    /// priority first: the in-progress P2 is older, yet the open P1 leads.
+    #[test]
+    fn higher_priority_sibling_leads_regardless_of_status() {
+        let g = Graph::build(vec![
+            bead("e", "open"),
+            with_priority(under("p2", "in_progress", "e"), 2, "2026-01-01T00:00:00Z"),
+            with_priority(under("p1", "open", "e"), 1, "2026-02-01T00:00:00Z"),
+        ]);
+        let kids: Vec<&str> = g.children[g.get("e").unwrap()]
+            .iter()
+            .map(|&i| g.beads[i].id.as_str())
+            .collect();
+        assert_eq!(kids, ["p1", "p2"]);
+    }
+
+    /// A P3 blocker is pulled above the P1 it blocks: dependency beats priority.
+    #[test]
+    fn blocker_precedes_the_bead_it_blocks() {
+        let g = Graph::build(vec![
+            bead("e", "open"),
+            blocked_on(
+                with_priority(under("hi", "open", "e"), 1, "2026-01-01T00:00:00Z"),
+                "lo",
+            ),
+            with_priority(under("lo", "open", "e"), 3, "2026-02-01T00:00:00Z"),
+        ]);
+        let kids: Vec<&str> = g.children[g.get("e").unwrap()]
+            .iter()
+            .map(|&i| g.beads[i].id.as_str())
+            .collect();
+        assert_eq!(kids, ["lo", "hi"]);
+    }
+
+    /// A closed blocker no longer holds anything back, so priority order stands.
+    #[test]
+    fn closed_blocker_does_not_constrain_order() {
+        let g = Graph::build(vec![
+            bead("e", "open"),
+            blocked_on(
+                with_priority(under("hi", "open", "e"), 1, "2026-01-01T00:00:00Z"),
+                "lo",
+            ),
+            with_priority(under("lo", "closed", "e"), 3, "2026-02-01T00:00:00Z"),
+        ]);
+        let kids: Vec<&str> = g.children[g.get("e").unwrap()]
+            .iter()
+            .map(|&i| g.beads[i].id.as_str())
+            .collect();
+        assert_eq!(kids, ["hi", "lo"]);
+    }
+
+    /// `a1` sits under root `A` and blocks `b1`, which sits under root `B`. The edge
+    /// lifts to `A` -> `B`, so `A` comes first even though `B` holds the P1.
+    #[test]
+    fn lifted_blocker_orders_the_roots_of_its_subtrees() {
+        let g = Graph::build(vec![
+            with_priority(bead("A", "open"), 3, "2026-01-01T00:00:00Z"),
+            with_priority(bead("B", "open"), 1, "2026-01-01T00:00:00Z"),
+            under("a1", "open", "A"),
+            blocked_on(under("b1", "open", "B"), "a1"),
+        ]);
+        let ids: Vec<&str> = g.roots.iter().map(|&i| g.beads[i].id.as_str()).collect();
+        assert_eq!(ids, ["A", "B"]);
+    }
+
+    /// A blocks cycle among siblings cannot stall the walk: each sibling appears
+    /// exactly once, and the smaller sort key goes first.
+    #[test]
+    fn blocks_cycle_among_siblings_yields_each_once() {
+        let g = Graph::build(vec![
+            bead("e", "open"),
+            blocked_on(
+                with_priority(under("x", "open", "e"), 1, "2026-01-01T00:00:00Z"),
+                "y",
+            ),
+            blocked_on(
+                with_priority(under("y", "open", "e"), 2, "2026-01-01T00:00:00Z"),
+                "x",
+            ),
+        ]);
+        let kids: Vec<&str> = g.children[g.get("e").unwrap()]
+            .iter()
+            .map(|&i| g.beads[i].id.as_str())
+            .collect();
+        assert_eq!(kids, ["x", "y"]);
     }
 }

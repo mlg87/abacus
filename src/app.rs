@@ -9,7 +9,7 @@ use ratatui::widgets::ListState;
 use crate::bd;
 use crate::dispatch::{self, ActiveRun, Requested, StartJob};
 use crate::git;
-use crate::model::{Bead, Graph, gh_number};
+use crate::model::{Bead, Derived, Graph, Status, gh_number};
 use crate::runs::{self, Mode, Registry, Run, RunMeta, RunState};
 use crate::session;
 use crate::view_model::{self, Filter, GraphScope, Layers, Row};
@@ -31,6 +31,11 @@ pub enum AppEvent {
     },
     BdWriteDone {
         message: String,
+    },
+    /// Outcome of handing back an ended run's claim: the ids that were reopened.
+    ClaimsReleased {
+        run_id: String,
+        result: Result<Vec<String>, String>,
     },
 }
 
@@ -63,13 +68,18 @@ pub struct PlanLine {
     pub gh: Option<u32>,
     pub outcome: Result<Mode, String>,
     pub retry_of: Option<String>,
+    /// Bead ids this line's run waits on (dependency chain); empty starts when free.
+    pub after: Vec<String>,
 }
 
 pub enum Modal {
     Dispatch(Vec<PlanLine>),
     Kill(String),
-    Release(String),
+    /// Bead plus every descendant, root first.
+    Delete(Vec<String>),
     Quit(usize),
+    /// Cancel every queued run; carries the count shown in the prompt.
+    DrainQueue(usize),
     Help,
 }
 
@@ -77,6 +87,16 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 const FALLBACK_POLL: Duration = Duration::from_secs(30);
 const RUN_POLL: Duration = Duration::from_millis(500);
 const MESSAGE_TTL: Duration = Duration::from_secs(5);
+
+/// Whether a run in `mode` on `run_bead` delivers `bead`: its own run, or a resolve
+/// run on one of its ancestors, which works the whole subtree.
+fn run_covers(mode: Mode, run_bead: &str, bead: &str, ancestors: &HashSet<&str>) -> bool {
+    match mode {
+        Mode::Decompose => false,
+        Mode::Resolve => run_bead == bead || ancestors.contains(run_bead),
+        Mode::Implement => run_bead == bead,
+    }
+}
 
 pub struct App {
     pub cfg: Config,
@@ -119,6 +139,9 @@ pub struct App {
     /// `None` follows the tail; `Some(n)` pins the first visible log line.
     pub log_scroll: Option<usize>,
     last_poll: Instant,
+    /// Run id → bead id for claim releases in flight; dispatch of that bead waits.
+    settling: HashMap<String, String>,
+    claims_dirty: bool,
 
     pub message: Option<(String, Instant)>,
     pub modal: Option<Modal>,
@@ -163,6 +186,8 @@ impl App {
             agents_sel: 0,
             log_scroll: None,
             last_poll: Instant::now(),
+            settling: HashMap::new(),
+            claims_dirty: true,
             message: None,
             modal: None,
             searching: false,
@@ -191,7 +216,7 @@ impl App {
     }
 
     pub fn sel_row(&self) -> Option<usize> {
-        (!self.rows.is_empty()).then_some(self.sel_row.min(self.rows.len() - 1))
+        (!self.rows.is_empty()).then(|| self.sel_row.min(self.rows.len() - 1))
     }
 
     pub fn matching_count(&self) -> usize {
@@ -265,10 +290,25 @@ impl App {
                     let bead = r.meta.bead_id.clone();
                     self.flash(format!("dispatch of {bead} failed: {error}"));
                 }
+                self.claims_dirty = true;
             }
             AppEvent::BdWriteDone { message } => {
                 self.flash(message);
                 self.request_reload();
+            }
+            AppEvent::ClaimsReleased { run_id, result } => {
+                self.settling.remove(&run_id);
+                match result {
+                    Ok(ids) => {
+                        self.registry.mark_claim_settled(&run_id);
+                        if !ids.is_empty() {
+                            self.flash(format!("released {} (run {run_id} ended)", ids.join(", ")));
+                            self.request_reload();
+                        }
+                    }
+                    // Left unsettled: the next bead reload retries it.
+                    Err(e) => self.flash(format!("could not release claim of run {run_id}: {e}")),
+                }
             }
         }
     }
@@ -278,6 +318,7 @@ impl App {
         match res {
             Ok(beads) => {
                 self.graph = Graph::build(beads);
+                self.claims_dirty = true;
                 self.loaded_at = Some(Instant::now());
                 self.bd_error = None;
                 self.rows_dirty = true;
@@ -323,9 +364,15 @@ impl App {
         }
         if now.duration_since(self.last_poll) >= RUN_POLL {
             self.last_poll = now;
-            self.registry.poll();
+            if self.registry.poll() > 0 {
+                self.claims_dirty = true;
+            }
         }
-        self.drain_queue();
+        // Descendant ids come from the graph, so wait for the first load.
+        if self.claims_dirty && self.loaded_at.is_some() {
+            self.settle_claims();
+        }
+        self.start_queued();
         if self
             .message
             .as_ref()
@@ -380,11 +427,22 @@ impl App {
 
     // ---------------------------------------------------------------- queue
 
-    fn active_runs(&self, except: Option<&str>) -> Vec<ActiveRun<'_>> {
+    fn active_runs(&self) -> Vec<ActiveRun<'_>> {
+        self.runs_where(RunState::is_active)
+    }
+
+    /// Queued runs are left out: planning already kept conflicting runs out of the
+    /// queue together, and chain steps queued behind one another must not block
+    /// each other's start.
+    fn started_runs(&self) -> Vec<ActiveRun<'_>> {
+        self.runs_where(|s| matches!(s, RunState::Starting | RunState::Running))
+    }
+
+    fn runs_where(&self, keep: impl Fn(RunState) -> bool) -> Vec<ActiveRun<'_>> {
         self.registry
             .runs
             .iter()
-            .filter(|r| r.meta.state.is_active() && Some(r.meta.run_id.as_str()) != except)
+            .filter(|r| keep(r.meta.state))
             .map(|r| ActiveRun {
                 run_id: &r.meta.run_id,
                 bead_id: &r.meta.bead_id,
@@ -393,7 +451,7 @@ impl App {
             .collect()
     }
 
-    fn enqueue(&mut self, bead_id: &str, mode: Mode, retry_of: Option<String>) {
+    fn enqueue(&mut self, bead_id: &str, mode: Mode, retry_of: Option<String>, after: Vec<String>) {
         let Some(i) = self.graph.get(bead_id) else {
             return;
         };
@@ -414,6 +472,8 @@ impl App {
             error: None,
             retry_of,
             hidden: false,
+            claim_settled: false,
+            after,
         };
         self.queue.push_back(meta.run_id.clone());
         self.registry.runs.push(Run {
@@ -422,18 +482,44 @@ impl App {
         });
     }
 
-    fn drain_queue(&mut self) {
-        while self.running_count() < self.cfg.max_concurrent {
-            let Some(run_id) = self.queue.pop_front() else {
-                return;
-            };
-            let Some(run) = self.registry.find(&run_id) else {
+    /// Scans the whole queue each tick: a run waiting on prerequisites must not hold
+    /// back ready runs queued behind it, and a stalled chain should fail promptly
+    /// even while every slot is busy.
+    fn start_queued(&mut self) {
+        let mut k = 0;
+        while k < self.queue.len() {
+            let run_id = self.queue[k].clone();
+            let Some(meta) = self
+                .registry
+                .find(&run_id)
+                .filter(|r| r.meta.state == RunState::Queued)
+                .map(|r| r.meta.clone())
+            else {
+                self.queue.remove(k);
                 continue;
             };
-            if run.meta.state != RunState::Queued {
+            match self.prerequisite_wait(&meta) {
+                Err(reason) => {
+                    self.queue.remove(k);
+                    self.fail_queued(&run_id, format!("skipped: {reason}"));
+                    continue;
+                }
+                Ok(waiting) if !waiting.is_empty() => {
+                    self.set_activity(&run_id, format!("waiting on {}", waiting.join(", ")));
+                    k += 1;
+                    continue;
+                }
+                Ok(_) => {}
+            }
+            // Starting now would race an in-flight claim release on this bead,
+            // which could reopen the claim this run is about to take.
+            let settling = self.settling.values().any(|b| *b == meta.bead_id);
+            if settling || self.running_count() >= self.cfg.max_concurrent {
+                self.set_activity(&run_id, "waiting for a free slot".into());
+                k += 1;
                 continue;
             }
-            let meta = run.meta.clone();
+            self.queue.remove(k);
             let outcome = match self.graph.get(&meta.bead_id) {
                 None => Err("bead no longer exists".to_string()),
                 Some(i) => {
@@ -445,24 +531,79 @@ impl App {
                     let retry_mode = meta.retry_of.as_ref().map(|_| meta.mode);
                     dispatch::plan_dispatch(
                         &self.graph,
-                        &self.active_runs(Some(&run_id)),
+                        &self.started_runs(),
                         i,
                         req,
                         retry_mode,
+                        false,
                     )
                     .map(|m| (i, m))
                 }
             };
             match outcome {
-                Err(reason) => {
-                    let r = self.registry.find_mut(&run_id).expect("found above");
-                    r.meta.state = RunState::Failed;
-                    r.meta.error = Some(format!("skipped at start: {reason}"));
-                    r.meta.ended_at = Some(runs::now_secs());
-                    let _ = runs::persist(&self.cfg.state_dir, &r.meta);
-                }
+                Err(reason) => self.fail_queued(&run_id, format!("skipped at start: {reason}")),
                 Ok((i, mode)) => self.start(i, mode, meta),
             }
+        }
+    }
+
+    fn fail_queued(&mut self, run_id: &str, error: String) {
+        let Some(r) = self.registry.find_mut(run_id) else {
+            return;
+        };
+        r.meta.state = RunState::Failed;
+        r.meta.error = Some(error);
+        r.meta.ended_at = Some(runs::now_secs());
+        r.progress.activity = None;
+        let _ = runs::persist(&self.cfg.state_dir, &r.meta);
+    }
+
+    fn set_activity(&mut self, run_id: &str, activity: String) {
+        if let Some(r) = self.registry.find_mut(run_id)
+            && r.progress.activity.as_deref() != Some(activity.as_str())
+        {
+            r.progress.activity = Some(activity);
+        }
+    }
+
+    /// `Ok` lists the `after` beads still open but on their way; `Err` names one
+    /// that nothing will deliver, so the queued run would wait forever.
+    fn prerequisite_wait(&self, meta: &RunMeta) -> Result<Vec<String>, String> {
+        let mut waiting = Vec::new();
+        for id in &meta.after {
+            // A deleted bead no longer blocks anything.
+            let Some(b) = self.graph.get(id) else {
+                continue;
+            };
+            if self.graph.beads[b].status == Status::Closed {
+                continue;
+            }
+            self.delivery(b)
+                .map_err(|why| format!("prerequisite {id} {why}"))?;
+            waiting.push(id.clone());
+        }
+        Ok(waiting)
+    }
+
+    /// Whether some run is still bringing open bead `b` to closed: one is queued or
+    /// running on it (or resolving an ancestor), or the latest one opened a PR that
+    /// closes it on merge.
+    fn delivery(&self, b: usize) -> Result<(), String> {
+        let id = self.graph.beads[b].id.as_str();
+        let ancestors = self.ancestor_ids(b);
+        let covers = |r: &&Run| run_covers(r.meta.mode, &r.meta.bead_id, id, &ancestors);
+        let mut runs = self.registry.runs.iter().filter(covers);
+        if runs.clone().any(|r| r.meta.state.is_active()) {
+            return Ok(());
+        }
+        match runs.next_back() {
+            Some(r) if r.meta.state == RunState::Succeeded && r.progress.pr_url.is_some() => Ok(()),
+            Some(r) => Err(format!(
+                "is still open after run {} {} without a PR",
+                r.meta.run_id,
+                r.meta.state.label()
+            )),
+            None => Err("is still open and has no run".into()),
         }
     }
 
@@ -494,6 +635,7 @@ impl App {
         );
         if let Some(r) = self.registry.find_mut(&meta.run_id) {
             r.meta = meta.clone();
+            r.progress.activity = None;
         }
         if let Err(e) = runs::persist(&self.cfg.state_dir, &meta) {
             self.handle(AppEvent::DispatchFailed {
@@ -620,9 +762,9 @@ impl App {
             Some(m) if no => drop(m),
             Some(Modal::Dispatch(lines)) if yes => {
                 let mut n = 0;
-                for l in &lines {
+                for l in lines {
                     if let Ok(mode) = l.outcome {
-                        self.enqueue(&l.bead_id, mode, l.retry_of.clone());
+                        self.enqueue(&l.bead_id, mode, l.retry_of, l.after);
                         n += 1;
                     }
                 }
@@ -630,7 +772,8 @@ impl App {
                 self.flash(format!("queued {n} run(s)"));
             }
             Some(Modal::Kill(run_id)) if yes => self.kill(&run_id),
-            Some(Modal::Release(run_id)) if yes => self.release(&run_id),
+            Some(Modal::Delete(ids)) if yes => self.delete(ids),
+            Some(Modal::DrainQueue(_)) if yes => self.cancel_all_queued(),
             Some(Modal::Quit(_)) if yes => self.quit = true,
             other => self.modal = other,
         }
@@ -718,6 +861,7 @@ impl App {
             KeyCode::Char(' ') => self.toggle_mark(),
             KeyCode::Char('d') => self.open_dispatch(Requested::Default),
             KeyCode::Char('D') => self.open_dispatch(Requested::Decompose),
+            KeyCode::Char('X') => self.open_delete(),
             KeyCode::Tab => {
                 if self.sel.is_some() {
                     self.focus = Focus::Detail;
@@ -906,6 +1050,7 @@ impl App {
             KeyCode::Char(' ') => self.toggle_mark(),
             KeyCode::Char('d') => self.open_dispatch(Requested::Default),
             KeyCode::Char('D') => self.open_dispatch(Requested::Decompose),
+            KeyCode::Char('X') => self.open_delete(),
             _ => {}
         }
     }
@@ -953,26 +1098,31 @@ impl App {
         let mut pending: Vec<(String, Mode)> = Vec::new();
         let mut lines = Vec::new();
         for i in targets {
-            let b = &self.graph.beads[i];
-            let outcome = {
-                let mut active = self.active_runs(None);
-                active.extend(pending.iter().map(|(id, m)| ActiveRun {
-                    run_id: "(this batch)",
-                    bead_id: id,
-                    mode: *m,
-                }));
-                dispatch::plan_dispatch(&self.graph, &active, i, req, None)
-            };
-            if let Ok(m) = outcome {
-                pending.push((b.id.clone(), m));
+            if pending.iter().any(|(id, _)| *id == self.graph.beads[i].id) {
+                // Already in the batch as another target's prerequisite.
+                continue;
             }
-            lines.push(PlanLine {
-                bead_id: b.id.clone(),
-                title: b.title.clone(),
-                gh: gh_number(b),
-                outcome,
-                retry_of: None,
-            });
+            let planned = if req == Requested::Default && self.graph.derived(i) == Derived::Blocked
+            {
+                self.plan_chain(i, &pending)
+            } else {
+                Ok(vec![self.plan_line(i, req, &pending, Vec::new())])
+            };
+            match planned {
+                Ok(chain) => {
+                    for l in &chain {
+                        if let Ok(m) = l.outcome {
+                            pending.push((l.bead_id.clone(), m));
+                        }
+                    }
+                    lines.extend(chain);
+                }
+                Err(reason) => {
+                    let mut line = self.plan_line(i, req, &pending, Vec::new());
+                    line.outcome = Err(reason);
+                    lines.push(line);
+                }
+            }
         }
         if lines.iter().all(|l| l.outcome.is_err()) {
             let reasons: Vec<String> = lines
@@ -982,6 +1132,73 @@ impl App {
             return self.flash(format!("nothing to dispatch — {}", reasons.join("; ")));
         }
         self.modal = Some(Modal::Dispatch(lines));
+    }
+
+    fn plan_line(
+        &self,
+        i: usize,
+        req: Requested,
+        pending: &[(String, Mode)],
+        after: Vec<usize>,
+    ) -> PlanLine {
+        let b = &self.graph.beads[i];
+        let mut active = self.active_runs();
+        active.extend(pending.iter().map(|(id, m)| ActiveRun {
+            run_id: "(this batch)",
+            bead_id: id,
+            mode: *m,
+        }));
+        let outcome =
+            dispatch::plan_dispatch(&self.graph, &active, i, req, None, !after.is_empty());
+        PlanLine {
+            bead_id: b.id.clone(),
+            title: b.title.clone(),
+            gh: gh_number(b),
+            outcome,
+            retry_of: None,
+            after: after
+                .into_iter()
+                .map(|j| self.graph.beads[j].id.clone())
+                .collect(),
+        }
+    }
+
+    /// Lines for blocked bead `i` and everything it waits on. All or nothing: a
+    /// chain missing a link would leave its tail queued until it stalls.
+    fn plan_chain(&self, i: usize, pending: &[(String, Mode)]) -> Result<Vec<PlanLine>, String> {
+        let covered = |j: usize| self.is_covered(j, pending);
+        dispatch::prerequisite_chain(&self.graph, i, &covered)?
+            .into_iter()
+            .map(|s| {
+                let is_target = s.idx == i;
+                let line = self.plan_line(s.idx, Requested::Default, pending, s.after);
+                match &line.outcome {
+                    Ok(_) => Ok(line),
+                    Err(e) if is_target => Err(e.clone()),
+                    Err(e) => Err(format!("prerequisite {}: {e}", line.bead_id)),
+                }
+            })
+            .collect()
+    }
+
+    /// Whether bead `j` is already on its way: a run planned in this batch covers it,
+    /// or `delivery` finds an active run or a PR awaiting merge. Scheduling it again
+    /// would redo work an open PR already holds.
+    fn is_covered(&self, j: usize, pending: &[(String, Mode)]) -> bool {
+        let ancestors = self.ancestor_ids(j);
+        let id = self.graph.beads[j].id.as_str();
+        pending
+            .iter()
+            .any(|(b, m)| run_covers(*m, b, id, &ancestors))
+            || self.delivery(j).is_ok()
+    }
+
+    fn ancestor_ids(&self, j: usize) -> HashSet<&str> {
+        self.graph
+            .ancestors(j)
+            .into_iter()
+            .map(|a| self.graph.beads[a].id.as_str())
+            .collect()
     }
 
     // ---------------------------------------------------------------- agents
@@ -1061,39 +1278,49 @@ impl App {
                     self.retry(&m);
                 }
             }
-            KeyCode::Char('X') => match run {
-                Some(m) if !m.state.is_active() && m.mode != Mode::Decompose => {
-                    self.modal = Some(Modal::Release(m.run_id));
-                }
-                Some(m) if m.mode == Mode::Decompose => {
-                    self.flash("decompose runs never claim their bead")
-                }
-                Some(_) => self.flash("release applies to ended runs"),
-                None => {}
-            },
             KeyCode::Char('o') => {
                 if let Some(m) = run {
                     self.open_session(&m);
                 }
             }
             KeyCode::Char('C') => self.clear_ended(),
+            KeyCode::Char('Q') => match self.queue.len() {
+                0 => self.flash("queue is empty"),
+                n => self.modal = Some(Modal::DrainQueue(n)),
+            },
             _ => {}
         }
     }
 
     fn cancel_queued(&mut self, run_id: &str) {
         self.queue.retain(|q| q != run_id);
+        self.mark_cancelled(run_id);
+        self.flash("queued run cancelled");
+    }
+
+    fn cancel_all_queued(&mut self) {
+        let ids: Vec<String> = self.queue.drain(..).collect();
+        for id in &ids {
+            self.mark_cancelled(id);
+        }
+        self.flash(format!("cancelled {} queued run(s)", ids.len()));
+    }
+
+    fn mark_cancelled(&mut self, run_id: &str) {
         if let Some(r) = self.registry.find_mut(run_id) {
             r.meta.state = RunState::Killed;
             r.meta.ended_at = Some(runs::now_secs());
             r.meta.error = Some("cancelled while queued".into());
+            r.progress.activity = None;
         }
-        self.flash("queued run cancelled");
     }
 
     fn kill(&mut self, run_id: &str) {
         match self.registry.kill(run_id) {
-            Ok(()) => self.flash(format!("killed {run_id}")),
+            Ok(()) => {
+                self.claims_dirty = true;
+                self.flash(format!("killed {run_id}"));
+            }
             Err(e) => self.flash(format!("kill failed: {e:#}")),
         }
     }
@@ -1105,37 +1332,165 @@ impl App {
         let Some(i) = self.graph.get(&m.bead_id) else {
             return self.flash(format!("{} is not loaded", m.bead_id));
         };
+        // A chain step skipped because a prerequisite stalled is still blocked:
+        // re-plan the chain instead of queueing a run that stalls again at once.
+        if m.mode != Mode::Decompose && self.graph.derived(i) == Derived::Blocked {
+            match self.plan_chain(i, &[]) {
+                Ok(mut lines) => {
+                    if let Some(target) = lines.last_mut() {
+                        target.retry_of = Some(m.run_id.clone());
+                    }
+                    let prerequisites = lines.len() - 1;
+                    for l in lines {
+                        if let Ok(mode) = l.outcome {
+                            self.enqueue(&l.bead_id, mode, l.retry_of, l.after);
+                        }
+                    }
+                    self.flash(format!(
+                        "retry of {} queued behind {prerequisites} prerequisite run(s)",
+                        m.bead_id
+                    ));
+                }
+                Err(reason) => self.flash(format!("cannot retry {}: {reason}", m.bead_id)),
+            }
+            return;
+        }
         let req = if m.mode == Mode::Decompose {
             Requested::Decompose
         } else {
             Requested::Default
         };
-        match dispatch::plan_dispatch(&self.graph, &self.active_runs(None), i, req, Some(m.mode)) {
+        let waits = !m.after.is_empty();
+        match dispatch::plan_dispatch(
+            &self.graph,
+            &self.active_runs(),
+            i,
+            req,
+            Some(m.mode),
+            waits,
+        ) {
             Ok(mode) => {
-                self.enqueue(&m.bead_id, mode, Some(m.run_id.clone()));
+                self.enqueue(&m.bead_id, mode, Some(m.run_id.clone()), m.after.clone());
                 self.flash(format!("retry of {} queued", m.bead_id));
             }
             Err(reason) => self.flash(format!("cannot retry {}: {reason}", m.bead_id)),
         }
     }
 
-    fn release(&mut self, run_id: &str) {
-        let Some(m) = self.registry.find(run_id).map(|r| r.meta.clone()) else {
+    /// A run that ends without closing its bead must not leave it `in_progress`:
+    /// the bead would read as taken and refuse dispatch while nothing runs.
+    fn settle_claims(&mut self) {
+        self.claims_dirty = false;
+        let candidates = self.registry.claims_to_release();
+        let active: HashSet<&str> = self
+            .registry
+            .runs
+            .iter()
+            .filter(|r| r.meta.state.is_active())
+            .map(|r| r.meta.bead_id.as_str())
+            .collect();
+        let mut jobs = Vec::new();
+        let mut gone = Vec::new();
+        for m in candidates {
+            if self.settling.contains_key(&m.run_id) {
+                continue;
+            }
+            let Some(i) = self.graph.get(&m.bead_id) else {
+                gone.push(m.run_id);
+                continue;
+            };
+            let mut ids = vec![m.bead_id.clone()];
+            if m.mode == Mode::Resolve {
+                // Resolve agents claim each child they work (prompt step 3).
+                ids.extend(
+                    self.graph
+                        .descendants(i)
+                        .into_iter()
+                        .map(|d| &self.graph.beads[d])
+                        .filter(|b| {
+                            b.status == Status::InProgress && !active.contains(b.id.as_str())
+                        })
+                        .map(|b| b.id.clone()),
+                );
+            }
+            let pr = self
+                .registry
+                .find(&m.run_id)
+                .and_then(|r| r.progress.pr_url.as_deref())
+                .map_or(String::new(), |u| format!("; its PR: {u}"));
+            let note = format!(
+                "abacus: run {} ended ({}); released its claim{pr}",
+                m.run_id,
+                m.state.label()
+            );
+            jobs.push((m.run_id, m.bead_id, ids, note));
+        }
+        for run_id in gone {
+            self.registry.mark_claim_settled(&run_id);
+        }
+        if jobs.is_empty() {
             return;
+        }
+        for (run_id, bead_id, ..) in &jobs {
+            self.settling.insert(run_id.clone(), bead_id.clone());
+        }
+        let tx = self.tx.clone();
+        let repo = self.cfg.repo_root.clone();
+        // One worker, sequential: concurrent `bd` writes contend for the embedded
+        // database and stall every other read.
+        std::thread::spawn(move || {
+            for (run_id, _, ids, note) in jobs {
+                let result =
+                    bd::release_still_claimed(&repo, &ids, &note).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(AppEvent::ClaimsReleased { run_id, result });
+            }
+        });
+    }
+
+    fn open_delete(&mut self) {
+        let Some(i) = self.sel_idx() else {
+            return self.flash("nothing selected");
         };
+        let mut set = vec![i];
+        set.extend(self.graph.descendants(i));
+        let ids: Vec<String> = set
+            .iter()
+            .map(|&j| self.graph.beads[j].id.clone())
+            .collect();
+        let active = self.active_runs();
+        let in_set = active.iter().find(|a| ids.iter().any(|id| id == a.bead_id));
+        let under_resolve = self.graph.ancestors(i).into_iter().find_map(|p| {
+            active
+                .iter()
+                .find(|a| a.mode == Mode::Resolve && a.bead_id == self.graph.beads[p].id)
+        });
+        let refusal = match (in_set, under_resolve) {
+            (Some(a), _) => Some(format!(
+                "cannot delete: {} has active run {}",
+                a.bead_id, a.run_id
+            )),
+            (None, Some(a)) => Some(format!(
+                "cannot delete: inside active resolve run of {}",
+                a.bead_id
+            )),
+            (None, None) => None,
+        };
+        match refusal {
+            Some(msg) => self.flash(msg),
+            None => self.modal = Some(Modal::Delete(ids)),
+        }
+    }
+
+    fn delete(&mut self, ids: Vec<String>) {
         let tx = self.tx.clone();
         let repo = self.cfg.repo_root.clone();
         std::thread::spawn(move || {
-            let note = format!("abacus: released after run {}", m.run_id);
-            let message = match bd::release(&repo, &m.bead_id, &note) {
-                Ok(()) => format!(
-                    "released {}; worktree kept at {}",
-                    m.bead_id,
-                    m.worktree
-                        .as_ref()
-                        .map_or("-".into(), |p| p.display().to_string())
-                ),
-                Err(e) => format!("release of {} failed: {e:#}", m.bead_id),
+            let message = match bd::delete(&repo, &ids) {
+                Ok(()) if ids.len() > 1 => {
+                    format!("deleted {} and {} descendant(s)", ids[0], ids.len() - 1)
+                }
+                Ok(()) => format!("deleted {}", ids[0]),
+                Err(e) => format!("delete failed: {e:#}"),
             };
             let _ = tx.send(AppEvent::BdWriteDone { message });
         });

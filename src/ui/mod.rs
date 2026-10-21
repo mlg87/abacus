@@ -153,13 +153,13 @@ fn bottom_bar(app: &App) -> Line<'static> {
             "↑↓ relationship · Enter jump · PgUp/PgDn scroll · Esc/Tab back"
         }
         (View::Tree, _) => {
-            "↑↓ move · →← expand/collapse · e/E all · space mark · d dispatch · D decompose · Tab detail · / search · f filter · L label · ? help · q quit"
+            "↑↓ move · →← expand/collapse · e/E all · space mark · d dispatch · D decompose · X delete · Tab detail · / search · f filter · L label · ? help · q quit"
         }
         (View::Graph, _) => {
-            "←→↑↓ move · Enter drill in · Backspace up · s scope · space mark · d dispatch · D decompose · ? help · q quit"
+            "←→↑↓ move · Enter drill in · Backspace up · s scope · space mark · d dispatch · D decompose · X delete · ? help · q quit"
         }
         (View::Agents, _) => {
-            "↑↓ run · Enter bead · K kill · R retry · X release · o session · C clear ended · PgUp/PgDn log · ? help · q quit"
+            "↑↓ run · Enter bead · K kill · R retry · Q drain queue · o session · C clear ended · PgUp/PgDn log · ? help · q quit"
         }
     };
     Line::from(Span::styled(hints, Style::new().fg(Color::DarkGray)))
@@ -192,9 +192,13 @@ const HELP: &[(&str, &str)] = &[
     ("space", "toggle mark"),
     (
         "d",
-        "dispatch marked or selected (resolve epics, implement tasks)",
+        "dispatch marked or selected; a blocked bead queues its prerequisites first",
     ),
     ("D", "decompose marked or selected epics"),
+    (
+        "X",
+        "delete selected bead and its descendants (beads it blocked are unblocked)",
+    ),
     (
         "Tab",
         "focus detail: ↑↓ entries, Enter jump, PgUp/PgDn scroll",
@@ -207,13 +211,13 @@ const HELP: &[(&str, &str)] = &[
         "drill into card / up to anchor's parent",
     ),
     ("s", "toggle scope Local / AllOpen"),
-    ("space, d, D", "as in tree"),
+    ("space, d, D, X", "as in tree"),
     ("Agents", ""),
     ("↑↓", "select run; PgUp/PgDn scroll its log"),
     ("Enter", "jump to the bead in the tree"),
     ("K", "kill running run (cancel queued)"),
     ("R", "retry ended run in the same mode"),
-    ("X", "release ended run's bead back to open"),
+    ("Q", "drain the queue: cancel every queued run"),
     ("o", "open the run's session in iTerm (or copy command)"),
     ("C", "hide ended runs, remove decompose scratch worktrees"),
 ];
@@ -243,15 +247,24 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 .map(|l| {
                     let gh = l.gh.map(|n| format!("#{n}")).unwrap_or_default();
                     match &l.outcome {
-                        Ok(m) => Line::from(vec![
-                            Span::raw(format!("{:<14} ", l.bead_id)),
-                            Span::styled(
-                                format!("{:<10}", m.label()),
-                                Style::new().fg(Color::Green),
-                            ),
-                            Span::raw(format!("{gh:<7}")),
-                            Span::raw(truncate(&l.title, 60)),
-                        ]),
+                        Ok(m) => {
+                            let mut spans = vec![
+                                Span::raw(format!("{:<14} ", l.bead_id)),
+                                Span::styled(
+                                    format!("{:<10}", m.label()),
+                                    Style::new().fg(Color::Green),
+                                ),
+                                Span::raw(format!("{gh:<7}")),
+                                Span::raw(truncate(&l.title, 60)),
+                            ];
+                            if !l.after.is_empty() {
+                                spans.push(Span::styled(
+                                    format!("  after {}", l.after.join(", ")),
+                                    Style::new().fg(theme::CYAN),
+                                ));
+                            }
+                            Line::from(spans)
+                        }
                         Err(reason) => Line::from(vec![
                             Span::raw(format!("{:<14} ", l.bead_id)),
                             Span::styled(format!("{:<10}", "SKIP"), Style::new().fg(Color::Red)),
@@ -261,6 +274,20 @@ fn draw_modal(f: &mut Frame, app: &App) {
                     }
                 })
                 .collect();
+            // Chains can run long; the count leads so it stays visible if the
+            // list is clipped by a short terminal.
+            let queued = plan.iter().filter(|l| l.outcome.is_ok()).count();
+            let waiting = plan
+                .iter()
+                .filter(|l| l.outcome.is_ok() && !l.after.is_empty())
+                .count();
+            let summary = if waiting > 0 {
+                format!("Queue {queued} run(s); {waiting} wait for prerequisites to close")
+            } else {
+                format!("Queue {queued} run(s)")
+            };
+            lines.insert(0, Line::from(Span::styled(summary, theme::heading())));
+            lines.insert(1, Line::raw(""));
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
                 "y/Enter queue · n/Esc cancel",
@@ -279,26 +306,63 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 )),
             ],
         ),
-        Modal::Release(id) => {
-            let bead = app
-                .registry
-                .find(id)
-                .map(|r| r.meta.bead_id.clone())
-                .unwrap_or_default();
-            (
-                "Release",
-                vec![
-                    Line::raw(format!(
-                        "Release {bead} back to open (run {id})? The worktree stays."
-                    )),
-                    Line::raw(""),
-                    Line::from(Span::styled(
-                        "y/Enter release · n/Esc cancel",
-                        Style::new().fg(Color::DarkGray),
-                    )),
-                ],
-            )
+        Modal::Delete(ids) => {
+            let g = &app.graph;
+            let doomed: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+            let mut unblocked: Vec<&str> = ids
+                .iter()
+                .filter_map(|id| g.get(id))
+                .flat_map(|i| g.dependents[i].iter().copied())
+                .map(|d| g.beads[d].id.as_str())
+                .filter(|d| !doomed.contains(d))
+                .collect();
+            unblocked.sort_unstable();
+            unblocked.dedup();
+            let title = ids
+                .first()
+                .and_then(|id| g.get(id))
+                .map_or("", |i| g.beads[i].title.as_str());
+            let mut lines = vec![Line::raw(format!(
+                "Delete {} {}?",
+                ids.first().map_or("", String::as_str),
+                truncate(title, 60)
+            ))];
+            if ids.len() > 1 {
+                lines.push(Line::raw(format!(
+                    "Its {} descendant(s) are deleted too.",
+                    ids.len() - 1
+                )));
+            }
+            if !unblocked.is_empty() {
+                lines.push(Line::raw(format!(
+                    "No longer blocked by it: {}",
+                    unblocked.join(", ")
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "This cannot be undone.",
+                Style::new().fg(Color::Red),
+            )));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "y/Enter delete · n/Esc cancel",
+                Style::new().fg(Color::DarkGray),
+            )));
+            ("Delete", lines)
         }
+        Modal::DrainQueue(n) => (
+            "Drain queue",
+            vec![
+                Line::raw(format!(
+                    "Cancel all {n} queued run(s)? Running agents keep running."
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "y/Enter drain · n/Esc keep",
+                    Style::new().fg(Color::DarkGray),
+                )),
+            ],
+        ),
         Modal::Quit(n) => (
             "Quit",
             vec![
