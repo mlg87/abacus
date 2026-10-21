@@ -65,6 +65,8 @@ Status glyphs match `bd graph`: `○` ready, `●` blocked, `◐` in progress, `
 
 An open parent whose remaining children are only in progress or blocked shows `◐` if any child is in progress, and `●` if none is. The detail pane names the cause of a block: the open blockers, the blocked ancestor, or "no open child is ready".
 
+Siblings in the tree are ordered by dependency (blockers first), then priority, then age, with closed beads last.
+
 ## How dispatch works
 
 Mark beads with <kbd>space</kbd>, then press <kbd>d</kbd> (or <kbd>D</kbd> to decompose). A confirm dialog shows the mode for each bead, or why it is skipped.
@@ -75,12 +77,20 @@ Mark beads with <kbd>space</kbd>, then press <kbd>d</kbd> (or <kbd>D</kbd> to de
 | implement | any other bead | `<repo>-<N>-<id>-<slug>` under a GitHub epic, otherwise `<repo>-bead-<id>-<slug>` | implements that bead only and opens a PR |
 | decompose | epic, via <kbd>D</kbd> | detached scratch checkout under the state dir | creates the missing child beads with `bd create --graph`, changing no files |
 
-Before a run starts, abacus claims the bead (`bd update --claim`). It refuses a bead that is not ready, that already has an active run, or that sits inside an active resolve run. At most `--max-concurrent` agents run at once; the rest wait in a queue.
+Before a run starts, abacus claims the bead (`bd update --claim`). It refuses a bead that already has an active run or that sits inside an active resolve run. At most `--max-concurrent` agents run at once; the rest wait in a queue.
+
+Dispatching a blocked bead queues its prerequisites instead of refusing it. abacus walks the open beads that block it, its ancestors, or its open children, and does the same for each of those that is blocked in turn. It queues every bead in dependency order, with the original bead last. The dialog shows what each one waits for (`after …`). A queued run starts once every bead it waits on has closed, so independent prerequisites run in parallel up to `--max-concurrent`. A bead that a running or queued run already covers is waited on, not dispatched again. The chain is all or nothing: if any prerequisite cannot be dispatched (a manual `blocked` status, a dependency cycle, an epic without a `gh-N` ref), the original bead is skipped with that reason. While a prerequisite's run is going, or its last run opened a PR, the runs after it keep waiting. When a prerequisite is still open after its last run ended without a PR, they fail with `skipped: prerequisite …`.
+
+When a run ends (succeeded, failed, or killed), abacus hands its claim back. It reopens the bead if it is still `in_progress`, and so stays dispatchable. For a resolve run it also reopens children the agent claimed. A bead the agent closed stays closed. Claims from runs that ended while abacus was not running are released at the next launch.
+
+The queue lives in memory. Quitting drops it (abacus asks first), and <kbd>Q</kbd> in the Agents view drains it, cancelling every queued run.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Queued: d / D
-    Queued --> Starting: slot free
+    Queued --> Starting: prerequisites closed and slot free
+    Queued --> Failed: prerequisite stalled
+    Queued --> Killed: K / Q
     Starting --> Running: worktree, claim, spawn
     Running --> Succeeded: exit 0
     Running --> Failed: non-zero exit or lost process
@@ -88,6 +98,10 @@ stateDiagram-v2
     Succeeded --> Queued: R retry
     Failed --> Queued: R retry
 ```
+
+## Deleting a bead
+
+<kbd>X</kbd> in the tree or graph deletes the selected bead and its descendants after a confirm dialog that lists the beads it currently blocks. `bd delete` removes every dependency link touching the deleted beads, so those beads lose the blocker and show as ready once nothing else holds them. abacus refuses while the bead, a descendant, or an ancestor's resolve run is active. Deletion cannot be undone.
 
 ## Options
 
@@ -110,9 +124,9 @@ Each run lives in `<state-dir>/runs/<run-id>/`: `meta.json`, `prompt.md`, `event
 | Everywhere | <kbd>r</kbd>, <kbd>?</kbd>, <kbd>q</kbd> | Reload, help, quit (running agents keep running) |
 | Tree | <kbd>→</kbd> <kbd>←</kbd>, <kbd>e</kbd> / <kbd>E</kbd> | Expand or collapse, all or none |
 | Tree | <kbd>Tab</kbd> | Focus the detail pane; <kbd>Enter</kbd> jumps to the highlighted relationship |
-| Tree, Graph | <kbd>space</kbd>, <kbd>d</kbd>, <kbd>D</kbd> | Mark, dispatch, decompose |
+| Tree, Graph | <kbd>space</kbd>, <kbd>d</kbd>, <kbd>D</kbd>, <kbd>X</kbd> | Mark, dispatch, decompose, delete |
 | Graph | <kbd>Enter</kbd> / <kbd>Backspace</kbd>, <kbd>s</kbd> | Drill in / back up, toggle scope |
-| Agents | <kbd>K</kbd>, <kbd>R</kbd>, <kbd>X</kbd> | Kill (or cancel a queued run), retry, release the bead back to open |
+| Agents | <kbd>K</kbd>, <kbd>R</kbd>, <kbd>Q</kbd> | Kill (or cancel a queued run), retry, drain the queue |
 | Agents | <kbd>o</kbd>, <kbd>C</kbd>, <kbd>Enter</kbd> | Open session, hide ended runs, jump to the bead |
 
 </details>

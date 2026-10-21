@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use anyhow::{Context, Result};
 use crate::app::AppEvent;
 use crate::bd;
 use crate::git::{self, WorktreePlan};
-use crate::model::{Derived, Graph, gh_number};
+use crate::model::{BlockedBy, Derived, Graph, Status, gh_number};
 use crate::prompt::{self, BeadRef, PreviousRun, PromptCtx};
 use crate::runs::{self, Mode, RunMeta, RunState};
 
@@ -28,13 +29,15 @@ pub struct ActiveRun<'a> {
 
 /// Decides which mode a dispatch of bead `idx` runs in, or why it must not run.
 /// `retry_mode` carries the mode of the run being retried; retries may pick up
-/// a bead their earlier attempt already claimed.
+/// a bead their earlier attempt already claimed. `waits` marks a run queued behind
+/// prerequisites: being blocked is then expected, unless by a manual `blocked` status.
 pub fn plan_dispatch(
     g: &Graph,
     active: &[ActiveRun],
     idx: usize,
     req: Requested,
     retry_mode: Option<Mode>,
+    waits: bool,
 ) -> Result<Mode, String> {
     let epic = g.is_epic(idx);
     let mode = match (retry_mode, req) {
@@ -64,6 +67,7 @@ pub fn plan_dispatch(
         (_, Derived::InProgress) => return Err("in progress".into()),
         (_, Derived::Closed) => return Err("closed".into()),
         (_, Derived::Deferred) => return Err("deferred".into()),
+        (_, Derived::Blocked) if waits && g.blocked_by(idx) != Some(BlockedBy::Status) => {}
         (_, Derived::Blocked) => {
             return Err(g.blocked_reason(idx).unwrap_or_else(|| "blocked".into()));
         }
@@ -95,6 +99,119 @@ pub fn plan_dispatch(
         }
     }
     Ok(mode)
+}
+
+/// One bead of a dependency chain: queued now, started once every bead in `after`
+/// has closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainStep {
+    pub idx: usize,
+    pub after: Vec<usize>,
+}
+
+/// Open beads outside `idx`'s own line (itself, ancestors, descendants) blocking the
+/// bead, an ancestor (whose gate holds back everything below it), or an open
+/// descendant (a resolve run has to work every child).
+pub fn gating_beads(g: &Graph, idx: usize) -> Vec<usize> {
+    let ancestors = g.ancestors(idx);
+    let descendants = g.descendants(idx);
+    let line: HashSet<usize> = std::iter::once(idx)
+        .chain(ancestors.iter().copied())
+        .chain(descendants.iter().copied())
+        .collect();
+    let open_descendants = descendants
+        .iter()
+        .copied()
+        .filter(|&d| g.beads[d].status != Status::Closed);
+    let mut seen = HashSet::new();
+    std::iter::once(idx)
+        .chain(ancestors.iter().copied())
+        .chain(open_descendants)
+        .flat_map(|n| g.blockers[n].iter().copied())
+        .filter(|&b| g.beads[b].status != Status::Closed && !line.contains(&b) && seen.insert(b))
+        .collect()
+}
+
+/// Everything that has to close before blocked bead `idx` can start, in dependency
+/// order and ending with `idx`. Dispatching a blocked bead used to be refused, which
+/// sent users hunting for the beads to dispatch first; now the chain is queued and
+/// runs in order, independent steps in parallel. `covered` marks beads an existing
+/// or already-planned run will deliver: they are waited on but not scheduled again.
+pub fn prerequisite_chain(
+    g: &Graph,
+    idx: usize,
+    covered: &dyn Fn(usize) -> bool,
+) -> Result<Vec<ChainStep>, String> {
+    let mut steps = Vec::new();
+    let mut done: HashMap<usize, bool> = HashMap::new();
+    visit_chain(g, idx, idx, covered, &mut done, &mut steps)?;
+
+    // A step under another step's resolve run is that run's work, unless the
+    // ancestor itself waits on it: then it must run first, on its own.
+    let pos: HashMap<usize, usize> = steps.iter().enumerate().map(|(k, s)| (s.idx, k)).collect();
+    let mut waits: Vec<HashSet<usize>> = Vec::with_capacity(steps.len());
+    for s in &steps {
+        let mut w = HashSet::new();
+        for &a in &s.after {
+            w.insert(a);
+            if let Some(&k) = pos.get(&a) {
+                w.extend(waits[k].iter().copied());
+            }
+        }
+        waits.push(w);
+    }
+    let keep: Vec<bool> = steps
+        .iter()
+        .map(|s| {
+            !g.ancestors(s.idx)
+                .iter()
+                .any(|a| pos.get(a).is_some_and(|&k| !waits[k].contains(&s.idx)))
+        })
+        .collect();
+    Ok(steps
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(s, k)| k.then_some(s))
+        .collect())
+}
+
+fn visit_chain(
+    g: &Graph,
+    n: usize,
+    root: usize,
+    covered: &dyn Fn(usize) -> bool,
+    done: &mut HashMap<usize, bool>,
+    steps: &mut Vec<ChainStep>,
+) -> Result<(), String> {
+    match done.get(&n) {
+        Some(true) => return Ok(()),
+        Some(false) => return Err(format!("dependency cycle through {}", g.beads[n].id)),
+        None => {}
+    }
+    let blocked = g.derived(n) == Derived::Blocked;
+    let after = if n == root || blocked {
+        gating_beads(g, n)
+    } else {
+        Vec::new()
+    };
+    if blocked && (after.is_empty() || g.blocked_by(n) == Some(BlockedBy::Status)) {
+        // Nothing outside the bead can unblock it: a manual hold or an internal knot.
+        let reason = g.blocked_reason(n).unwrap_or_else(|| "blocked".into());
+        return Err(if n == root {
+            reason
+        } else {
+            format!("prerequisite {}: {reason}", g.beads[n].id)
+        });
+    }
+    done.insert(n, false);
+    for &p in &after {
+        if !covered(p) {
+            visit_chain(g, p, root, covered, done, steps)?;
+        }
+    }
+    done.insert(n, true);
+    steps.push(ChainStep { idx: n, after });
+    Ok(())
 }
 
 pub fn slugify(title: &str) -> String {
@@ -303,7 +420,7 @@ fn try_start(mut job: StartJob) -> Result<(u32, PathBuf, Option<String>)> {
         Err(e) => {
             if claimed {
                 let note = format!("abacus: spawn failed for run {}: {e:#}", job.meta.run_id);
-                let _ = bd::release(&job.repo_root, &job.meta.bead_id, &note);
+                let _ = bd::release(&job.repo_root, &[&job.meta.bead_id], &note);
             }
             Err(e)
         }
@@ -394,20 +511,24 @@ mod tests {
         let i = |id| g.get(id).unwrap();
 
         assert_eq!(
-            plan_dispatch(&g, &[], i("e"), Requested::Default, None),
+            plan_dispatch(&g, &[], i("e"), Requested::Default, None, false),
             Ok(Mode::Resolve)
         );
         assert!(
-            plan_dispatch(&g, &[], i("bare"), Requested::Default, None)
+            plan_dispatch(&g, &[], i("bare"), Requested::Default, None, false)
                 .unwrap_err()
                 .starts_with("epic has no gh-N external ref")
         );
         assert_eq!(
-            plan_dispatch(&g, &[], i("t2"), Requested::Default, None),
+            plan_dispatch(&g, &[], i("t2"), Requested::Default, None, false),
             Err("blocked by t1".into())
         );
         assert_eq!(
-            plan_dispatch(&g, &[], i("t1"), Requested::Decompose, None),
+            plan_dispatch(&g, &[], i("t2"), Requested::Default, None, true),
+            Ok(Mode::Implement)
+        );
+        assert_eq!(
+            plan_dispatch(&g, &[], i("t1"), Requested::Decompose, None, false),
             Err("decompose applies to epics only".into())
         );
 
@@ -417,7 +538,7 @@ mod tests {
             mode: Mode::Resolve,
         }];
         assert_eq!(
-            plan_dispatch(&g, &resolve, i("t1"), Requested::Default, None),
+            plan_dispatch(&g, &resolve, i("t1"), Requested::Default, None, false),
             Err("inside active resolve run of e".into())
         );
         let child_run = [ActiveRun {
@@ -426,16 +547,16 @@ mod tests {
             mode: Mode::Implement,
         }];
         assert_eq!(
-            plan_dispatch(&g, &child_run, i("e"), Requested::Default, None),
+            plan_dispatch(&g, &child_run, i("e"), Requested::Default, None, false),
             Err("descendant t1 has an active run".into())
         );
         assert_eq!(
-            plan_dispatch(&g, &child_run, i("t1"), Requested::Default, None),
+            plan_dispatch(&g, &child_run, i("t1"), Requested::Default, None, false),
             Err("already has active run r2".into())
         );
 
         assert_eq!(
-            plan_dispatch(&g, &[], i("busy"), Requested::Default, None),
+            plan_dispatch(&g, &[], i("busy"), Requested::Default, None, false),
             Err("in progress".into())
         );
         assert_eq!(
@@ -444,7 +565,8 @@ mod tests {
                 &[],
                 i("busy"),
                 Requested::Default,
-                Some(Mode::Implement)
+                Some(Mode::Implement),
+                false
             ),
             Ok(Mode::Implement)
         );
@@ -457,8 +579,116 @@ mod tests {
         let g = Graph::build(vec![e, bead("x", "open")]);
         assert_eq!(g.derived(0), Derived::Blocked);
         assert_eq!(
-            plan_dispatch(&g, &[], 0, Requested::Decompose, None),
+            plan_dispatch(&g, &[], 0, Requested::Decompose, None, false),
             Ok(Mode::Decompose)
+        );
+    }
+
+    fn blocked_on(mut b: crate::model::Bead, on: &str) -> crate::model::Bead {
+        let id = b.id.clone();
+        b.dependencies.push(dep(&id, on, "blocks"));
+        b
+    }
+
+    /// Chain as (bead id, after ids), for readable assertions.
+    fn chain(
+        g: &Graph,
+        id: &str,
+        covered: &dyn Fn(usize) -> bool,
+    ) -> Result<Vec<(String, Vec<String>)>, String> {
+        let ids = |v: &[usize]| v.iter().map(|&j| g.beads[j].id.clone()).collect::<Vec<_>>();
+        prerequisite_chain(g, g.get(id).unwrap(), covered).map(|steps| {
+            steps
+                .iter()
+                .map(|s| (g.beads[s.idx].id.clone(), ids(&s.after)))
+                .collect()
+        })
+    }
+
+    fn step(id: &str, after: &[&str]) -> (String, Vec<String>) {
+        (id.into(), after.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn chain_orders_transitive_blockers_first_and_leaves_independent_ones_parallel() {
+        let g = Graph::build(vec![
+            blocked_on(blocked_on(bead("t", "open"), "b"), "p"),
+            blocked_on(bead("b", "open"), "c"),
+            bead("c", "open"),
+            bead("p", "open"),
+        ]);
+        assert_eq!(
+            chain(&g, "t", &|_| false),
+            Ok(vec![
+                step("c", &[]),
+                step("b", &["c"]),
+                step("p", &[]),
+                step("t", &["b", "p"]),
+            ])
+        );
+    }
+
+    #[test]
+    fn chain_for_an_epic_waits_on_what_blocks_its_children() {
+        let g = Graph::build(vec![
+            epic("x", Some(1)),
+            blocked_on(child("c1", "x"), "p1"),
+            blocked_on(child("c2", "x"), "p2"),
+            // Internal ordering is the resolve run's business, not the chain's.
+            blocked_on(child("c3", "x"), "c1"),
+            bead("p1", "open"),
+            bead("p2", "open"),
+        ]);
+        assert_eq!(
+            chain(&g, "x", &|_| false),
+            Ok(vec![
+                step("p1", &[]),
+                step("p2", &[]),
+                step("x", &["p1", "p2"])
+            ])
+        );
+    }
+
+    #[test]
+    fn chain_waits_on_covered_beads_without_scheduling_them() {
+        let g = Graph::build(vec![blocked_on(bead("t", "open"), "b"), bead("b", "open")]);
+        let b = g.get("b").unwrap();
+        assert_eq!(chain(&g, "t", &|j| j == b), Ok(vec![step("t", &["b"])]));
+    }
+
+    #[test]
+    fn chain_leaves_a_step_to_its_ancestors_resolve_run() {
+        let g = Graph::build(vec![
+            blocked_on(blocked_on(bead("t", "open"), "a"), "a1"),
+            epic("a", Some(7)),
+            child("a1", "a"),
+        ]);
+        assert_eq!(
+            chain(&g, "t", &|_| false),
+            Ok(vec![step("a", &[]), step("t", &["a", "a1"])])
+        );
+    }
+
+    #[test]
+    fn chain_refuses_cycles_and_manual_holds() {
+        let g = Graph::build(vec![
+            blocked_on(bead("t", "open"), "a"),
+            blocked_on(bead("a", "open"), "b"),
+            blocked_on(bead("b", "open"), "a"),
+        ]);
+        assert!(
+            chain(&g, "t", &|_| false)
+                .unwrap_err()
+                .starts_with("dependency cycle")
+        );
+
+        let g = Graph::build(vec![
+            blocked_on(bead("t", "open"), "h"),
+            bead("h", "blocked"),
+        ]);
+        assert_eq!(
+            chain(&g, "t", &|_| false),
+            Err("prerequisite h: blocked (status)".into())
         );
     }
 

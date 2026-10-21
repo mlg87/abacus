@@ -77,6 +77,14 @@ pub struct RunMeta {
     pub retry_of: Option<String>,
     #[serde(default)]
     pub hidden: bool,
+    /// True once the bead claim this run took (or would have taken) has been
+    /// handed back; runs that predate the field load as unsettled so their stale
+    /// claims are released on the next launch.
+    #[serde(default)]
+    pub claim_settled: bool,
+    /// Bead ids that must close before this queued run may start (dependency chain).
+    #[serde(default)]
+    pub after: Vec<String>,
 }
 
 pub fn now_secs() -> u64 {
@@ -400,6 +408,42 @@ impl Registry {
         });
         Ok(())
     }
+
+    /// Ended runs whose bead may still be held `in_progress` by their claim. Only
+    /// runs that spawned an agent ever held one, and only the newest such run per
+    /// bead still does: an older run's claim passed to the newer one, so it is
+    /// marked settled here without touching `bd`.
+    pub fn claims_to_release(&mut self) -> Vec<RunMeta> {
+        let held = |m: &RunMeta| m.mode != Mode::Decompose && m.pid.is_some();
+        let mut newest: std::collections::HashMap<&str, usize> = Default::default();
+        for (i, r) in self.runs.iter().enumerate() {
+            if held(&r.meta) {
+                newest.insert(r.meta.bead_id.as_str(), i);
+            }
+        }
+        let newest: std::collections::HashSet<usize> = newest.into_values().collect();
+        let mut out = Vec::new();
+        for (i, r) in self.runs.iter_mut().enumerate() {
+            if r.meta.claim_settled || !held(&r.meta) || r.meta.state.is_active() {
+                continue;
+            }
+            if newest.contains(&i) {
+                out.push(r.meta.clone());
+            } else {
+                r.meta.claim_settled = true;
+                let _ = persist(&self.state_dir, &r.meta);
+            }
+        }
+        out
+    }
+
+    pub fn mark_claim_settled(&mut self, run_id: &str) {
+        let state_dir = self.state_dir.clone();
+        if let Some(r) = self.find_mut(run_id) {
+            r.meta.claim_settled = true;
+            let _ = persist(&state_dir, &r.meta);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -495,6 +539,8 @@ mod tests {
             error: None,
             retry_of: None,
             hidden: false,
+            claim_settled: false,
+            after: Vec::new(),
         }
     }
 
@@ -535,5 +581,45 @@ mod tests {
             reloaded.find("2-dead").unwrap().meta.state,
             RunState::Failed
         );
+    }
+
+    #[test]
+    fn only_the_newest_ended_claiming_run_per_bead_releases() {
+        let state = tempfile::tempdir().unwrap();
+        let repo = Path::new("/repo/a");
+        let run = |id: &str, bead: &str, mode: Mode, state: RunState, pid: Option<u32>| {
+            let mut m = meta(id, repo, pid);
+            m.bead_id = bead.into();
+            m.mode = mode;
+            m.state = state;
+            Run {
+                meta: m,
+                progress: Progress::default(),
+            }
+        };
+        let mut reg = Registry {
+            state_dir: state.path().into(),
+            runs: vec![
+                run("1-old", "a", Mode::Resolve, RunState::Failed, Some(1)),
+                run("2-new", "a", Mode::Resolve, RunState::Succeeded, Some(2)),
+                // Neither a decompose nor a run cancelled before spawning ever
+                // claimed, so they must not shadow 2-new.
+                run("3-plan", "a", Mode::Decompose, RunState::Succeeded, Some(3)),
+                run("4-skip", "a", Mode::Resolve, RunState::Killed, None),
+                run("5-b", "b", Mode::Implement, RunState::Failed, Some(5)),
+                run("6-c", "c", Mode::Implement, RunState::Running, Some(6)),
+            ],
+        };
+        let ids: Vec<String> = reg
+            .claims_to_release()
+            .into_iter()
+            .map(|m| m.run_id)
+            .collect();
+        assert_eq!(ids, ["2-new", "5-b"]);
+        assert!(reg.find("1-old").unwrap().meta.claim_settled);
+
+        reg.mark_claim_settled("2-new");
+        reg.mark_claim_settled("5-b");
+        assert!(reg.claims_to_release().is_empty());
     }
 }
