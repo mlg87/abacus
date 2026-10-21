@@ -11,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::app::{App, Modal, View};
+use crate::model::Derived;
 use crate::runs::{Run, RunState};
 use crate::update::{Status as UpdateStatus, Version};
 
@@ -201,6 +202,26 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     }
 }
 
+/// Explains the tree/graph status glyphs. Leads the help so it survives a short
+/// terminal clipping the modal; the glyph and colour come from `Derived` itself.
+const LEGEND: &[(Derived, &str)] = &[
+    (
+        Derived::Ready,
+        "an agent can start now; epic: some open child is ready",
+    ),
+    (
+        Derived::Blocked,
+        "open blocker or blocked ancestor; epic: no child ready or in progress",
+    ),
+    (
+        Derived::InProgress,
+        "being worked; epic: no child ready, some in progress",
+    ),
+    (Derived::Deferred, "deferred; not dispatchable"),
+    (Derived::Closed, "done"),
+    (Derived::Other, "status abacus does not recognise"),
+];
+
 const HELP: &[(&str, &str)] = &[
     ("Global", ""),
     ("1 / 2 / 3", "tree / graph / agents view"),
@@ -254,8 +275,17 @@ fn draw_modal(f: &mut Frame, app: &App) {
     let (title, lines): (&str, Vec<Line>) = match modal {
         Modal::Help => (
             "Help",
-            HELP.iter()
-                .map(|(k, v)| {
+            std::iter::once(Line::from(Span::styled("Status", theme::heading())))
+                .chain(LEGEND.iter().map(|&(d, meaning)| {
+                    Line::from(vec![
+                        Span::styled(
+                            format!("  {} {:<22}", d.glyph(), d.label()),
+                            Style::new().fg(d.color()),
+                        ),
+                        Span::raw(meaning),
+                    ])
+                }))
+                .chain(HELP.iter().map(|(k, v)| {
                     if v.is_empty() {
                         Line::from(Span::styled(*k, theme::heading()))
                     } else {
@@ -264,7 +294,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
                             Span::raw(*v),
                         ])
                     }
-                })
+                }))
                 .collect(),
         ),
         Modal::Dispatch(plan) => {
