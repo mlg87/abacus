@@ -274,6 +274,20 @@ fn draw_modal(f: &mut Frame, app: &App) {
                     }
                 })
                 .collect();
+            // Chains can run long; the count leads so it stays visible if the
+            // list is clipped by a short terminal.
+            let queued = plan.iter().filter(|l| l.outcome.is_ok()).count();
+            let waiting = plan
+                .iter()
+                .filter(|l| l.outcome.is_ok() && !l.after.is_empty())
+                .count();
+            let summary = if waiting > 0 {
+                format!("Queue {queued} run(s); {waiting} wait for prerequisites to close")
+            } else {
+                format!("Queue {queued} run(s)")
+            };
+            lines.insert(0, Line::from(Span::styled(summary, theme::heading())));
+            lines.insert(1, Line::raw(""));
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
                 "y/Enter queue · n/Esc cancel",

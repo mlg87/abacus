@@ -1181,16 +1181,16 @@ impl App {
             .collect()
     }
 
-    /// Whether an active run, or one planned in this batch, will deliver bead `j`.
+    /// Whether bead `j` is already on its way: a run planned in this batch covers it,
+    /// or `delivery` finds an active run or a PR awaiting merge. Scheduling it again
+    /// would redo work an open PR already holds.
     fn is_covered(&self, j: usize, pending: &[(String, Mode)]) -> bool {
         let ancestors = self.ancestor_ids(j);
         let id = self.graph.beads[j].id.as_str();
-        self.active_runs()
+        pending
             .iter()
-            .any(|a| run_covers(a.mode, a.bead_id, id, &ancestors))
-            || pending
-                .iter()
-                .any(|(b, m)| run_covers(*m, b, id, &ancestors))
+            .any(|(b, m)| run_covers(*m, b, id, &ancestors))
+            || self.delivery(j).is_ok()
     }
 
     fn ancestor_ids(&self, j: usize) -> HashSet<&str> {
@@ -1332,6 +1332,29 @@ impl App {
         let Some(i) = self.graph.get(&m.bead_id) else {
             return self.flash(format!("{} is not loaded", m.bead_id));
         };
+        // A chain step skipped because a prerequisite stalled is still blocked:
+        // re-plan the chain instead of queueing a run that stalls again at once.
+        if m.mode != Mode::Decompose && self.graph.derived(i) == Derived::Blocked {
+            match self.plan_chain(i, &[]) {
+                Ok(mut lines) => {
+                    if let Some(target) = lines.last_mut() {
+                        target.retry_of = Some(m.run_id.clone());
+                    }
+                    let prerequisites = lines.len() - 1;
+                    for l in lines {
+                        if let Ok(mode) = l.outcome {
+                            self.enqueue(&l.bead_id, mode, l.retry_of, l.after);
+                        }
+                    }
+                    self.flash(format!(
+                        "retry of {} queued behind {prerequisites} prerequisite run(s)",
+                        m.bead_id
+                    ));
+                }
+                Err(reason) => self.flash(format!("cannot retry {}: {reason}", m.bead_id)),
+            }
+            return;
+        }
         let req = if m.mode == Mode::Decompose {
             Requested::Decompose
         } else {
@@ -1390,8 +1413,13 @@ impl App {
                         .map(|b| b.id.clone()),
                 );
             }
+            let pr = self
+                .registry
+                .find(&m.run_id)
+                .and_then(|r| r.progress.pr_url.as_deref())
+                .map_or(String::new(), |u| format!("; its PR: {u}"));
             let note = format!(
-                "abacus: run {} ended ({}); released its claim",
+                "abacus: run {} ended ({}); released its claim{pr}",
                 m.run_id,
                 m.state.label()
             );
