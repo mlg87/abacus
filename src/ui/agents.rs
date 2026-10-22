@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState};
 
-use super::{fmt_duration, spinner, state_style, theme, truncate};
+use super::{fmt_duration, fmt_local_time, spinner, state_style, theme, truncate};
 use crate::app::App;
 use crate::runs::{RunState, now_secs};
 
@@ -29,10 +29,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 }
                 s => s.label().to_string(),
             };
-            let started = m
-                .started_at
-                .map(|s| format!("{} ago", fmt_duration(now.saturating_sub(s))))
-                .unwrap_or_else(|| "-".into());
+            let started = m.started_at.map_or_else(|| "-".into(), fmt_local_time);
             let elapsed = m
                 .started_at
                 .map(|s| fmt_duration(m.ended_at.unwrap_or(now).saturating_sub(s)))
@@ -65,7 +62,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(12),
             Constraint::Length(16),
             Constraint::Length(10),
-            Constraint::Length(10),
+            Constraint::Length(19),
             Constraint::Length(8),
             Constraint::Length(7),
             Constraint::Min(20),

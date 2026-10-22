@@ -50,6 +50,28 @@ pub fn fmt_duration(secs: u64) -> String {
     }
 }
 
+/// Renders unix seconds as `HH:MM:SS YYYY-MM-DD` in the machine's timezone. A
+/// fixed timestamp replaced "Ns ago" in the Agents tab: a counter that never
+/// stops ticking says nothing the Elapsed column doesn't.
+pub fn fmt_local_time(secs: u64) -> String {
+    let t = secs as libc::time_t;
+    // SAFETY: `tm` is plain data; localtime_r is the reentrant variant and only
+    // writes into the buffer we pass it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return "-".into();
+    }
+    format!(
+        "{:02}:{:02}:{:02} {:04}-{:02}-{:02}",
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday
+    )
+}
+
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
