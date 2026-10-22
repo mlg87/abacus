@@ -545,4 +545,17 @@ mod tests {
         });
         assert_eq!(app.update, Some(UpdateStatus::Available(newer)));
     }
+
+    #[test]
+    fn help_leads_with_every_status_glyph_even_in_a_short_terminal() {
+        let state = tempfile::tempdir().unwrap();
+        let mut app = app(state.path());
+        press(&mut app, '?');
+        // 16 rows clips the help well before its key bindings end.
+        let help = screen(&mut app, 120).join("\n");
+        for &(d, meaning) in LEGEND {
+            let row = format!("{} {:<22}{meaning}", d.glyph(), d.label());
+            assert!(help.contains(&row), "missing {row:?} in\n{help}");
+        }
+    }
 }
