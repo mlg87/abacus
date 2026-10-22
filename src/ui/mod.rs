@@ -580,4 +580,45 @@ mod tests {
             assert!(help.contains(&row), "missing {row:?} in\n{help}");
         }
     }
+
+    #[test]
+    fn agents_started_is_a_full_wall_clock_stamp_not_a_running_counter() {
+        use crate::runs::{Mode, Progress, Run, RunMeta, RunState};
+        let state = tempfile::tempdir().unwrap();
+        let mut app = app(state.path());
+        app.registry.runs.push(Run {
+            meta: RunMeta {
+                run_id: "1-x-1".into(),
+                repo_root: "/repo/a".into(),
+                bead_id: "x-1".into(),
+                bead_title: "t".into(),
+                mode: Mode::Resolve,
+                state: RunState::Succeeded,
+                worktree: None,
+                branch: None,
+                pid: None,
+                queued_at: 1_792_705_713,
+                started_at: Some(1_792_705_713),
+                ended_at: Some(1_792_705_748),
+                exit_code: Some(0),
+                error: None,
+                retry_of: None,
+                hidden: false,
+                claim_settled: true,
+                after: Vec::new(),
+            },
+            progress: Progress::default(),
+        });
+        press(&mut app, '3');
+        let rows = screen(&mut app, 120);
+        let row = rows.iter().find(|l| l.contains("x-1")).unwrap();
+        assert!(!row.contains(" ago"), "{row}");
+        // Timezone-independent: the stamp must render whole, not clipped by the column.
+        let cell = &row[row.find("resolve").unwrap() + 11..][..19];
+        let shape: String = cell
+            .chars()
+            .map(|c| if c.is_ascii_digit() { 'd' } else { c })
+            .collect();
+        assert_eq!(shape, "dd:dd:dd dddd-dd-dd", "{row}");
+    }
 }
