@@ -62,7 +62,7 @@ Status glyphs match `bd graph`: `○` ready, `●` blocked, `◐` in progress, `
 - no ancestor is blocked by status or by an open `blocks` target, since that dependency also holds back everything below the ancestor;
 - if the bead has open children, at least one of them is ready.
 
-An open parent whose remaining children are only in progress or blocked shows `◐` if any child is in progress, and `●` if none is. The detail pane names the cause of a block: the open blockers, the blocked ancestor, or "no open child is ready".
+An open parent whose remaining children are only in progress or blocked shows `◐` if any child is in progress, and `●` if none is. The detail pane names the cause of a block: the open blockers, the blocked ancestor, or "no open child is ready". The <kbd>?</kbd> help opens with this legend.
 
 Siblings in the tree are ordered by dependency (blockers first), then priority, then age, with closed beads last.
 
