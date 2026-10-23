@@ -50,6 +50,28 @@ pub fn fmt_duration(secs: u64) -> String {
     }
 }
 
+/// Renders unix seconds as `HH:MM:SS YYYY-MM-DD` in the machine's timezone. A
+/// fixed timestamp replaced "Ns ago" in the Agents tab: a counter that never
+/// stops ticking says nothing the Elapsed column doesn't.
+pub fn fmt_local_time(secs: u64) -> String {
+    let t = secs as libc::time_t;
+    // SAFETY: `tm` is plain data; localtime_r is the reentrant variant and only
+    // writes into the buffer we pass it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return "-".into();
+    }
+    format!(
+        "{:02}:{:02}:{:02} {:04}-{:02}-{:02}",
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday
+    )
+}
+
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -557,5 +579,46 @@ mod tests {
             let row = format!("{} {:<22}{meaning}", d.glyph(), d.label());
             assert!(help.contains(&row), "missing {row:?} in\n{help}");
         }
+    }
+
+    #[test]
+    fn agents_started_is_a_full_wall_clock_stamp_not_a_running_counter() {
+        use crate::runs::{Mode, Progress, Run, RunMeta, RunState};
+        let state = tempfile::tempdir().unwrap();
+        let mut app = app(state.path());
+        app.registry.runs.push(Run {
+            meta: RunMeta {
+                run_id: "1-x-1".into(),
+                repo_root: "/repo/a".into(),
+                bead_id: "x-1".into(),
+                bead_title: "t".into(),
+                mode: Mode::Resolve,
+                state: RunState::Succeeded,
+                worktree: None,
+                branch: None,
+                pid: None,
+                queued_at: 1_792_705_713,
+                started_at: Some(1_792_705_713),
+                ended_at: Some(1_792_705_748),
+                exit_code: Some(0),
+                error: None,
+                retry_of: None,
+                hidden: false,
+                claim_settled: true,
+                after: Vec::new(),
+            },
+            progress: Progress::default(),
+        });
+        press(&mut app, '3');
+        let rows = screen(&mut app, 120);
+        let row = rows.iter().find(|l| l.contains("x-1")).unwrap();
+        assert!(!row.contains(" ago"), "{row}");
+        // Timezone-independent: the stamp must render whole, not clipped by the column.
+        let cell = &row[row.find("resolve").unwrap() + 11..][..19];
+        let shape: String = cell
+            .chars()
+            .map(|c| if c.is_ascii_digit() { 'd' } else { c })
+            .collect();
+        assert_eq!(shape, "dd:dd:dd dddd-dd-dd", "{row}");
     }
 }
