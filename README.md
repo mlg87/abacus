@@ -80,13 +80,15 @@ Before a run starts, abacus claims the bead (`bd update --claim`). It refuses a 
 
 Dispatching a blocked bead queues its prerequisites instead of refusing it. abacus walks the open beads that block it, its ancestors, or its open children, and does the same for each of those that is blocked in turn. It queues every bead in dependency order, with the original bead last. The dialog shows what each one waits for (`after …`). A queued run starts once every bead it waits on has closed, so independent prerequisites run in parallel up to `--max-concurrent`. A bead that a running or queued run already covers is waited on, not dispatched again. The chain is all or nothing: if any prerequisite cannot be dispatched (a manual `blocked` status, a dependency cycle, an epic without a `gh-N` ref), the original bead is skipped with that reason. While a prerequisite's run is going, or its last run opened a PR, the runs after it keep waiting. When a prerequisite is still open after its last run ended without a PR, they fail with `skipped: prerequisite …`.
 
+<kbd>A</kbd> in the tree dispatches all ready work at once. It takes every `○` bead without open children that the current filters (status, label, search) match, and leaves out beads that a running or queued run already covers or whose PR is awaiting merge. A ready epic is not dispatched itself; its ready children are, so they can run in parallel. The queue order is highest priority first. Among beads of equal priority, the one whose close would unblock the most beads goes first: the beads that would stop showing `●` at once, counting the children of an epic it gates. The dialog shows each bead's priority and that count. Runs start in this order as slots free up.
+
 When a run ends (succeeded, failed, or killed), abacus hands its claim back. It reopens the bead if it is still `in_progress`, and so stays dispatchable. For a resolve run it also reopens children the agent claimed. A bead the agent closed stays closed. Claims from runs that ended while abacus was not running are released at the next launch.
 
 The queue lives in memory. Quitting drops it (abacus asks first), and <kbd>Q</kbd> in the Agents view drains it, cancelling every queued run.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Queued: d / D
+    [*] --> Queued: d / D / A
     Queued --> Starting: prerequisites closed and slot free
     Queued --> Failed: prerequisite stalled
     Queued --> Killed: K / Q
@@ -124,6 +126,7 @@ Each run lives in `<state-dir>/runs/<run-id>/`: `meta.json`, `prompt.md`, `event
 | Everywhere | <kbd>U</kbd> | Install the newer release that the bottom bar offers |
 | Tree | <kbd>→</kbd> <kbd>←</kbd>, <kbd>e</kbd> / <kbd>E</kbd> | Expand or collapse, all or none |
 | Tree | <kbd>Tab</kbd> | Focus the detail pane; <kbd>Enter</kbd> jumps to the highlighted relationship |
+| Tree | <kbd>A</kbd> | Dispatch every ready bead the filters match, by priority, then beads unblocked |
 | Tree, Graph | <kbd>space</kbd>, <kbd>d</kbd>, <kbd>D</kbd>, <kbd>X</kbd> | Mark, dispatch, decompose, delete |
 | Graph | <kbd>Enter</kbd> / <kbd>Backspace</kbd>, <kbd>s</kbd> | Drill in / back up, toggle scope |
 | Agents | <kbd>K</kbd>, <kbd>R</kbd>, <kbd>Q</kbd> | Kill (or cancel a queued run), retry, drain the queue |

@@ -178,7 +178,7 @@ fn bottom_bar(app: &App) -> Line<'static> {
             "↑↓ relationship · Enter jump · PgUp/PgDn scroll · Esc/Tab back"
         }
         (View::Tree, _) => {
-            "↑↓ move · →← expand/collapse · e/E all · space mark · d dispatch · D decompose · X delete · Tab detail · / search · f filter · L label · ? help · q quit"
+            "↑↓ move · →← expand/collapse · e/E all · space mark · d dispatch · A dispatch all ready · D decompose · X delete · Tab detail · / search · f filter · L label · ? help · q quit"
         }
         (View::Graph, _) => {
             "←→↑↓ move · Enter drill in · Backspace up · s scope · space mark · d dispatch · D decompose · X delete · ? help · q quit"
@@ -263,6 +263,10 @@ const HELP: &[(&str, &str)] = &[
         "d",
         "dispatch marked or selected; a blocked bead queues its prerequisites first",
     ),
+    (
+        "A",
+        "queue every ready leaf the filter matches: priority, then most beads unblocked",
+    ),
     ("D", "decompose marked or selected epics"),
     (
         "X",
@@ -333,8 +337,18 @@ fn draw_modal(f: &mut Frame, app: &App) {
                                     Style::new().fg(Color::Green),
                                 ),
                                 Span::raw(format!("{gh:<7}")),
-                                Span::raw(truncate(&l.title, 60)),
                             ];
+                            // Dispatch-all ranks its lines; the rank column says why.
+                            if let Some(n) = l.unblocks {
+                                let p = app.graph.get(&l.bead_id).map_or(String::new(), |i| {
+                                    format!("P{} ", app.graph.beads[i].priority)
+                                });
+                                spans.push(Span::styled(
+                                    format!("{:<16}", format!("{p}unblocks {n}")),
+                                    Style::new().fg(theme::CYAN),
+                                ));
+                            }
+                            spans.push(Span::raw(truncate(&l.title, 60)));
                             if !l.after.is_empty() {
                                 spans.push(Span::styled(
                                     format!("  after {}", l.after.join(", ")),
@@ -359,7 +373,11 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 .iter()
                 .filter(|l| l.outcome.is_ok() && !l.after.is_empty())
                 .count();
-            let summary = if waiting > 0 {
+            let summary = if plan.iter().any(|l| l.unblocks.is_some()) {
+                format!(
+                    "Queue {queued} ready run(s) matching the filter: highest priority first, then most beads unblocked"
+                )
+            } else if waiting > 0 {
                 format!("Queue {queued} run(s); {waiting} wait for prerequisites to close")
             } else {
                 format!("Queue {queued} run(s)")
@@ -620,5 +638,27 @@ mod tests {
             .map(|c| if c.is_ascii_digit() { 'd' } else { c })
             .collect();
         assert_eq!(shape, "dd:dd:dd dddd-dd-dd", "{row}");
+    }
+
+    /// The dispatch-all dialog names each line's rank, so its order explains itself.
+    #[test]
+    fn dispatch_all_dialog_shows_priority_and_unblock_count_per_line() {
+        use crate::model::tests::{bead, dep};
+        let state = tempfile::tempdir().unwrap();
+        let mut app = app(state.path());
+        let mut waits = bead("waits", "open");
+        waits.dependencies.push(dep("waits", "gate", "blocks"));
+        app.handle(AppEvent::BeadsLoaded(Ok(vec![bead("gate", "open"), waits])));
+        press(&mut app, 'A');
+        let dialog = screen(&mut app, 140);
+        assert!(
+            dialog.iter().any(|l| l.contains("Queue 1 ready run(s)")),
+            "{dialog:#?}"
+        );
+        let row = dialog.iter().find(|l| l.contains("implement")).unwrap();
+        assert!(
+            row.contains("gate") && row.contains("P2 unblocks 1"),
+            "{row}"
+        );
     }
 }

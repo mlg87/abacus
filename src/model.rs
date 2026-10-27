@@ -280,22 +280,30 @@ impl Graph {
         }
     }
 
+    fn derive_all(&mut self) {
+        self.derived = self.derive_as(None);
+    }
+
     /// Children must be derived before their parent (roll-up), and gating is read
     /// off ancestors' own edges, so a post-order walk of the parent forest suffices.
-    fn derive_all(&mut self) {
+    /// `closing` (if any) reads as closed, so `unblock_count` can ask what closing
+    /// it would change.
+    fn derive_as(&self, closing: Option<usize>) -> Vec<Derived> {
+        let mut derived = vec![Derived::Other; self.beads.len()];
         let mut stack: Vec<(usize, bool)> = self.roots.iter().map(|&r| (r, false)).collect();
         while let Some((i, children_done)) = stack.pop() {
             if children_done {
-                self.derived[i] = self.derive_one(i);
+                derived[i] = self.derive_one(i, &derived, closing);
             } else {
                 stack.push((i, true));
                 stack.extend(self.children[i].iter().map(|&c| (c, false)));
             }
         }
+        derived
     }
 
-    fn derive_one(&self, i: usize) -> Derived {
-        match self.beads[i].status {
+    fn derive_one(&self, i: usize, derived: &[Derived], closing: Option<usize>) -> Derived {
+        match self.status_as(i, closing) {
             Status::Open => {}
             Status::InProgress => return Derived::InProgress,
             Status::Blocked => return Derived::Blocked,
@@ -303,12 +311,12 @@ impl Graph {
             Status::Closed => return Derived::Closed,
             Status::Other => return Derived::Other,
         }
-        if self.has_open_blocker(i) || self.gated_ancestor(i).is_some() {
+        if self.has_open_blocker(i, closing) || self.gated_ancestor(i, closing).is_some() {
             return Derived::Blocked;
         }
         let mut open_children = self.children[i]
             .iter()
-            .map(|&c| self.derived[c])
+            .map(|&c| derived[c])
             .filter(|&d| d != Derived::Closed)
             .peekable();
         if open_children.peek().is_none() {
@@ -329,16 +337,43 @@ impl Graph {
         }
     }
 
-    fn has_open_blocker(&self, i: usize) -> bool {
-        self.blockers[i]
-            .iter()
-            .any(|&j| self.beads[j].status != Status::Closed)
+    fn status_as(&self, j: usize, closing: Option<usize>) -> Status {
+        if closing == Some(j) {
+            Status::Closed
+        } else {
+            self.beads[j].status
+        }
     }
 
-    fn gated_ancestor(&self, i: usize) -> Option<usize> {
-        self.ancestors(i)
-            .into_iter()
-            .find(|&a| self.beads[a].status == Status::Blocked || self.has_open_blocker(a))
+    fn has_open_blocker(&self, i: usize, closing: Option<usize>) -> bool {
+        self.blockers[i]
+            .iter()
+            .any(|&j| self.status_as(j, closing) != Status::Closed)
+    }
+
+    fn gated_ancestor(&self, i: usize, closing: Option<usize>) -> Option<usize> {
+        self.ancestors(i).into_iter().find(|&a| {
+            self.status_as(a, closing) == Status::Blocked || self.has_open_blocker(a, closing)
+        })
+    }
+
+    /// Other beads that closing ready bead `i` would unblock: `Blocked` now but not
+    /// once it closes, so their ● turns ○ (or ◐) in the tree. Includes the subtree
+    /// of an ancestor it gates and parents whose only hope was a child it blocks.
+    /// Dispatch-all ranks equal-priority work by it (v0.5).
+    pub fn unblock_count(&self, i: usize) -> usize {
+        // Only `blocks` edges let a bead's status gate other beads. Without
+        // dependents, closing a ready bead changes just its ancestors' roll-up,
+        // and none of them is blocked while it is ready.
+        if self.dependents[i].is_empty() && self.derived[i] == Derived::Ready {
+            return 0;
+        }
+        let after = self.derive_as(Some(i));
+        (0..self.beads.len())
+            .filter(|&j| {
+                j != i && self.derived[j] == Derived::Blocked && after[j] != Derived::Blocked
+            })
+            .count()
     }
 
     /// Siblings read in dependency order (blockers first), then priority, then age;
@@ -447,7 +482,7 @@ impl Graph {
         if !open.is_empty() {
             return Some(BlockedBy::Beads(open));
         }
-        Some(match self.gated_ancestor(i) {
+        Some(match self.gated_ancestor(i, None) {
             Some(a) => BlockedBy::Ancestor(a),
             None => BlockedBy::NoReadyChild,
         })
@@ -765,5 +800,26 @@ pub mod tests {
             .map(|&i| g.beads[i].id.as_str())
             .collect();
         assert_eq!(kids, ["x", "y"]);
+    }
+
+    /// Counts what would turn ○ the moment `x` closes: a direct dependent, the whole
+    /// subtree of an epic it gates, and a parent whose only open child it blocks.
+    /// A dependent still held by another blocker, or by a manual hold, is not.
+    #[test]
+    fn unblock_count_is_what_closing_the_bead_would_turn_ready() {
+        let g = Graph::build(vec![
+            bead("x", "open"),
+            bead("y", "open"),
+            blocked_on(bead("a", "open"), "x"),
+            blocked_on(blocked_on(bead("b", "open"), "x"), "y"),
+            blocked_on(bead("e", "open"), "x"),
+            under("e1", "open", "e"),
+            under("e2", "open", "e"),
+            bead("p", "open"),
+            blocked_on(under("p1", "open", "p"), "x"),
+            blocked_on(bead("h", "blocked"), "x"),
+        ]);
+        assert_eq!(g.unblock_count(g.get("x").unwrap()), 6);
+        assert_eq!(g.unblock_count(g.get("y").unwrap()), 0);
     }
 }

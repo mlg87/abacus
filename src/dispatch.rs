@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::os::unix::process::CommandExt;
@@ -212,6 +213,42 @@ fn visit_chain(
     done.insert(n, true);
     steps.push(ChainStep { idx: n, after });
     Ok(())
+}
+
+/// A dispatch-all target and how many beads its close would unblock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadyLeaf {
+    pub idx: usize,
+    pub unblocks: usize,
+}
+
+/// Dispatch-all's targets in queue order (v0.5): every ready bead without open
+/// children that `include` accepts, highest priority first, then the one whose
+/// close unblocks the most beads, then the tree's age order. Leaves rather than
+/// their epics: a resolve run works an epic's children one at a time, while its
+/// ready leaves can all run at once.
+pub fn ready_leaves(g: &Graph, include: &dyn Fn(usize) -> bool) -> Vec<ReadyLeaf> {
+    let mut out: Vec<ReadyLeaf> = (0..g.beads.len())
+        .filter(|&i| {
+            g.derived(i) == Derived::Ready
+                && g.children[i]
+                    .iter()
+                    .all(|&c| g.beads[c].status == Status::Closed)
+                && include(i)
+        })
+        .map(|idx| ReadyLeaf {
+            idx,
+            unblocks: g.unblock_count(idx),
+        })
+        .collect();
+    out.sort_by_key(|l| {
+        (
+            g.beads[l.idx].priority,
+            Reverse(l.unblocks),
+            g.sort_key(l.idx),
+        )
+    });
+    out
 }
 
 pub fn slugify(title: &str) -> String {
@@ -689,6 +726,40 @@ mod tests {
         assert_eq!(
             chain(&g, "t", &|_| false),
             Err("prerequisite h: blocked (status)".into())
+        );
+    }
+
+    /// Priority beats unblock count, unblock count beats age, and an epic with a
+    /// ready child is left to that child.
+    #[test]
+    fn ready_leaves_rank_priority_then_unblocks_then_age() {
+        let mut hi = bead("hi", "open");
+        hi.priority = 1;
+        let mut old = bead("old", "open");
+        old.created_at = "2025-01-01T00:00:00Z".into();
+        let mut excluded = bead("excluded", "open");
+        excluded.priority = 0;
+        let g = Graph::build(vec![
+            epic("e", Some(1)),
+            child("c", "e"),
+            bead("one", "open"),
+            blocked_on(bead("d3", "open"), "one"),
+            bead("two", "open"),
+            blocked_on(bead("d1", "open"), "two"),
+            blocked_on(bead("d2", "open"), "two"),
+            old,
+            hi,
+            excluded,
+            bead("done", "closed"),
+        ]);
+        let skip = g.get("excluded").unwrap();
+        let ranked: Vec<(&str, usize)> = ready_leaves(&g, &|i| i != skip)
+            .iter()
+            .map(|l| (g.beads[l.idx].id.as_str(), l.unblocks))
+            .collect();
+        assert_eq!(
+            ranked,
+            [("hi", 0), ("two", 2), ("one", 1), ("old", 0), ("c", 0)]
         );
     }
 
