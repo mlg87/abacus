@@ -78,6 +78,9 @@ pub struct PlanLine {
     pub retry_of: Option<String>,
     /// Bead ids this line's run waits on (dependency chain); empty starts when free.
     pub after: Vec<String>,
+    /// Set by dispatch-all (`A`): beads this bead's close would unblock, its rank
+    /// after priority.
+    pub unblocks: Option<usize>,
 }
 
 pub enum Modal {
@@ -916,6 +919,7 @@ impl App {
             }
             KeyCode::Char(' ') => self.toggle_mark(),
             KeyCode::Char('d') => self.open_dispatch(Requested::Default),
+            KeyCode::Char('A') => self.open_dispatch_ready(),
             KeyCode::Char('D') => self.open_dispatch(Requested::Decompose),
             KeyCode::Char('X') => self.open_delete(),
             KeyCode::Tab => {
@@ -1180,6 +1184,32 @@ impl App {
                 }
             }
         }
+        self.show_plan(lines);
+    }
+
+    /// Queues every ready leaf the filter matches, in `dispatch::ready_leaves` order.
+    /// Beads a run already covers (active, queued, or its PR awaiting merge) are
+    /// left out: pressing `A` again must not queue the same work twice.
+    fn open_dispatch_ready(&mut self) {
+        let include = |i| self.filter.matches(&self.graph, i) && !self.is_covered(i, &[]);
+        let leaves = dispatch::ready_leaves(&self.graph, &include);
+        if leaves.is_empty() {
+            return self.flash("no ready bead matching the filter is left to dispatch");
+        }
+        let mut pending: Vec<(String, Mode)> = Vec::new();
+        let mut lines = Vec::with_capacity(leaves.len());
+        for l in leaves {
+            let mut line = self.plan_line(l.idx, Requested::Default, &pending, Vec::new());
+            if let Ok(m) = line.outcome {
+                pending.push((line.bead_id.clone(), m));
+            }
+            line.unblocks = Some(l.unblocks);
+            lines.push(line);
+        }
+        self.show_plan(lines);
+    }
+
+    fn show_plan(&mut self, lines: Vec<PlanLine>) {
         if lines.iter().all(|l| l.outcome.is_err()) {
             let reasons: Vec<String> = lines
                 .iter()
@@ -1216,6 +1246,7 @@ impl App {
                 .into_iter()
                 .map(|j| self.graph.beads[j].id.clone())
                 .collect(),
+            unblocks: None,
         }
     }
 
@@ -1630,5 +1661,75 @@ impl App {
             };
             let _ = tx.send(AppEvent::BdWriteDone { message });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::model::tests::bead;
+
+    fn app(state: &Path) -> App {
+        let repo = Path::new("/repo/a");
+        let cfg = Config {
+            repo_root: repo.to_path_buf(),
+            state_dir: state.to_path_buf(),
+            max_concurrent: 1,
+            model: None,
+            agent_cmd: "omp".into(),
+            repo_name: "a".into(),
+            origin: None,
+        };
+        let (tx, _) = std::sync::mpsc::channel();
+        App::new(cfg, Registry::load(state, repo).unwrap(), tx)
+    }
+
+    fn press(app: &mut App, c: char) {
+        app.handle(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::NONE,
+        )));
+    }
+
+    fn labelled(id: &str, label: &str, priority: i32) -> Bead {
+        let mut b = bead(id, "open");
+        b.labels = vec![label.into()];
+        b.priority = priority;
+        b
+    }
+
+    /// `A` takes only the beads the filter matches, queues them in rank order, and a
+    /// second press finds nothing left: queued work counts as covered.
+    #[test]
+    fn dispatch_all_queues_matching_ready_leaves_once() {
+        let state = tempfile::tempdir().unwrap();
+        let mut app = app(state.path());
+        app.handle(AppEvent::BeadsLoaded(Ok(vec![
+            labelled("api-1", "api", 2),
+            labelled("api-2", "api", 1),
+            labelled("web-1", "web", 0),
+        ])));
+        app.filter.label = Some("api".into());
+
+        press(&mut app, 'A');
+        let Some(Modal::Dispatch(lines)) = &app.modal else {
+            panic!("no dispatch dialog");
+        };
+        let planned: Vec<&str> = lines.iter().map(|l| l.bead_id.as_str()).collect();
+        assert_eq!(planned, ["api-2", "api-1"]);
+
+        press(&mut app, 'y');
+        let queued: Vec<&str> = app
+            .queue
+            .iter()
+            .map(|id| app.registry.find(id).unwrap().meta.bead_id.as_str())
+            .collect();
+        assert_eq!(queued, ["api-2", "api-1"]);
+
+        press(&mut app, 'A');
+        assert!(app.modal.is_none());
+        assert_eq!(app.queued_count(), 2);
     }
 }
